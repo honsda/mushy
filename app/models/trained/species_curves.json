@@ -1,0 +1,83 @@
+{
+  "_meta": {
+    "version": 1,
+    "description": "Parametric cardinal-temperature / humidity niche curves for the six seed species. Suitability is a predicted niche-fit score, not a detection or an occurrence probability.",
+    "units": {
+      "T": "degrees Celsius",
+      "RH": "percent relative humidity",
+      "lux": "lux"
+    },
+    "sources": [
+      "Pitt & Hocking, Fungi and Food Spoilage (3rd ed., 2009) - cardinal temperatures and water-activity/RH minima for Aspergillus and Eurotium.",
+      "Flannigan & Miller (2011), Microbial growth in indoor environments; Grant et al. (1989) - Aspergillus versicolor T/RH growth isopleths.",
+      "Andersen, Nielsen & Jarvis (2002), Stachybotrys chartarum microcolony growth; Flannigan & Miller - high-RH requirement.",
+      "Andrews & Pitt (1987), xerophilic Eurotium spp. water relations; Samson, Hoekstra & Frisvad (2004).",
+      "Ramos et al. (1998) and Pitt & Hocking (2009) - Aspergillus ochraceus group ecophysiology.",
+      "Data INRAE Fusarium ecophysiology records - Fusarium cardinal temperatures and high-aw requirement.",
+      "Values are rounded literature midpoints and are meant for ranking, not regulatory or clinical decisions."
+    ],
+    "lux_note": "lux_pref is an optional triangular modifier. Where sources are light-agnostic the curve spans normal indoor light so it barely changes the ranking."
+  },
+  "species": [
+    {
+      "name": "Aspergillus versicolor",
+      "T_min": 4.0,
+      "T_opt": 25.0,
+      "T_max": 37.0,
+      "RH_min": 65.0,
+      "RH_opt": 85.0,
+      "lux_pref": {"min": 0.0, "opt": 20.0, "max": 800.0},
+      "note": "Common indoor mould; grows from ~4 C, optimum near 25 C, needs RH above ~65 %."
+    },
+    {
+      "name": "Stachybotrys chartarum",
+      "T_min": 5.0,
+      "T_opt": 23.0,
+      "T_max": 35.0,
+      "RH_min": 90.0,
+      "RH_opt": 97.0,
+      "lux_pref": {"min": 0.0, "opt": 0.0, "max": 300.0},
+      "note": "Requires sustained very-wet conditions (RH >= 90 %); low-light competitor."
+    },
+    {
+      "name": "Eurotium herbariorum",
+      "T_min": 4.0,
+      "T_opt": 27.0,
+      "T_max": 37.0,
+      "RH_min": 70.0,
+      "RH_opt": 85.0,
+      "lux_pref": {"min": 0.0, "opt": 10.0, "max": 600.0},
+      "note": "Xerophilic; can grow at lower RH than the other seed species."
+    },
+    {
+      "name": "Aspergillus niger",
+      "T_min": 6.0,
+      "T_opt": 33.0,
+      "T_max": 47.0,
+      "RH_min": 75.0,
+      "RH_opt": 90.0,
+      "lux_pref": {"min": 0.0, "opt": 50.0, "max": 1500.0},
+      "note": "Warm-adapted; broad temperature range, high RH optimum."
+    },
+    {
+      "name": "Aspergillus ochraceus group",
+      "T_min": 8.0,
+      "T_opt": 28.0,
+      "T_max": 37.0,
+      "RH_min": 75.0,
+      "RH_opt": 90.0,
+      "lux_pref": {"min": 0.0, "opt": 30.0, "max": 1000.0},
+      "note": "Ochratoxin-producing group; warm and humid preference."
+    },
+    {
+      "name": "Fusarium spp.",
+      "T_min": 2.0,
+      "T_opt": 24.0,
+      "T_max": 32.0,
+      "RH_min": 85.0,
+      "RH_opt": 97.0,
+      "lux_pref": {"min": 0.0, "opt": 100.0, "max": 2000.0},
+      "note": "High water-activity requirement; curve informed by Data INRAE ecophysiology records."
+    }
+  ]
+}

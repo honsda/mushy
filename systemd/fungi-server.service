@@ -1,0 +1,22 @@
+[Unit]
+Description=Fungal growth forecast dashboard (Flask)
+Documentation=file:///home/pi/fungi-forecast/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/fungi-forecast
+Environment=PYTHONUNBUFFERED=1
+Environment=FUNGI_CONFIG=/home/pi/fungi-forecast/config.yaml
+ExecStart=/home/pi/fungi-forecast/.venv/bin/python -m app.server
+Restart=always
+RestartSec=5
+TimeoutStopSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

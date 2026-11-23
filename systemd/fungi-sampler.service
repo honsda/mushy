@@ -1,0 +1,22 @@
+[Unit]
+Description=Fungal growth forecast 30 s sampler
+Documentation=file:///home/pi/fungi-forecast/README.md
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/fungi-forecast
+Environment=PYTHONUNBUFFERED=1
+Environment=FUNGI_CONFIG=/home/pi/fungi-forecast/config.yaml
+ExecStart=/home/pi/fungi-forecast/.venv/bin/python scripts/sample_loop.py
+Restart=always
+RestartSec=10
+TimeoutStopSec=15
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

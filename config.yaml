@@ -1,0 +1,23 @@
+sensors:
+  dht22_pin: 4
+  light_driver: bh1750   # bh1750 | mcp3008
+  i2c_bus: 1
+  # Bench/CI only. Set true (or FUNGI_SIMULATE=1) when no hardware is attached.
+  simulate: false
+sampling:
+  interval_seconds: 30
+spatial:
+  x_max: 10.0
+  y_max: 8.0
+  resolution: 100
+  method: idw            # idw | cubic
+  fixed_node_position: [5.0, 4.0]   # set to null for a position-less fixed node
+  window_hours: 6
+server:
+  host: 0.0.0.0
+  port: 5000
+species:
+  mode: auto             # auto = ml if model exists else parametric
+  top_k: 5
+database:
+  path: fungi.db         # relative to the project root; override with FUNGI_DB
