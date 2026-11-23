@@ -1,0 +1,271 @@
+#!/usr/bin/env python3
+"""Acceptance harness for spec section 15 — one command, terse output.
+
+    python scripts/verify.py        # PASS/FAIL table, exit code 1 on any failure
+    python scripts/verify.py -v     # same, plus a measured detail per check
+
+Uses a throwaway SQLite file and the simulated sensors (FUNGI_SIMULATE=1), so it
+is safe on the dev machine, in CI, and on the Pi. It does write
+static/heatmap.png, because that is exactly what /heatmap.png does in service.
+
+Checks that need hardware, a reboot, or a Bluetooth peer stay manual and are
+listed at the end of AGENTS.md.
+"""
+
+from __future__ import annotations
+
+import gzip
+import json
+import os
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+ASSETS = (
+    "static/dashboard.css",
+    "static/htmx.min.js",
+    "static/uplot.min.js",
+    "static/uplot.min.css",
+)
+RISK_CLASSES = {"low", "moderate", "high", "critical"}
+
+_client = None
+
+
+def client():
+    global _client
+    if _client is None:
+        from app.server import create_app
+
+        application = create_app()
+        application.config.update(TESTING=True)
+        _client = application.test_client()
+    return _client
+
+
+def counts() -> dict[str, int]:
+    con = sqlite3.connect(os.environ["FUNGI_DB"])
+    try:
+        return {
+            t: con.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+            for t in ("readings", "fgpi", "species_predictions")
+        }
+    finally:
+        con.close()
+
+
+def check_schema():
+    import app.db as db
+
+    db.init_db()
+    con = sqlite3.connect(os.environ["FUNGI_DB"])
+    try:
+        tables = {
+            r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        indexes = {
+            r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='index'")
+        }
+    finally:
+        con.close()
+    missing = {"readings", "fgpi", "species_predictions"} - tables
+    assert not missing, f"missing tables: {sorted(missing)}"
+    missing = {"idx_readings_ts", "idx_fgpi_ts"} - indexes
+    assert not missing, f"missing indexes: {sorted(missing)}"
+    return f"tables {sorted(tables - {'sqlite_sequence'})}"
+
+
+def check_sampler():
+    before = counts()
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "sample_loop.py"), "--once"],
+        cwd=ROOT,
+        env=os.environ.copy(),
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert proc.returncode == 0, (proc.stderr or proc.stdout).strip()[-500:]
+    after = counts()
+    for table, n in before.items():
+        assert after[table] >= n + 1, f"{table}: {n} -> {after[table]} (need +1)"
+    return " +1 reading/fgpi/species"
+
+
+def check_api_latest():
+    resp = client().get("/api/latest")
+    assert resp.status_code == 200, resp.status_code
+    body = resp.get_json()
+    assert body is not None, "not JSON"
+    for key in ("ts", "fgpi", "risk_class", "species"):
+        assert key in body, f"missing {key}"
+    assert body["risk_class"] in RISK_CLASSES, body["risk_class"]
+    species = body["species"]
+    assert isinstance(species, list) and species, "no species predictions"
+    suit = [p["suitability"] for p in species]
+    assert suit == sorted(suit, reverse=True), "species not sorted desc"
+    assert all(0.0 <= s <= 1.0 for s in suit), suit
+    return f"fgpi={body['fgpi']:.1f} {body['risk_class']}, {len(species)} species"
+
+
+def check_api_series():
+    body = client().get("/api/series?hours=6").get_json()
+    for key in ("ts", "fgpi", "humidity"):
+        assert isinstance(body.get(key), list), f"missing list {key}"
+    assert len(body["ts"]) == len(body["fgpi"]), "series lengths differ"
+    return f"{len(body['ts'])} points"
+
+
+def check_dashboard():
+    resp = client().get("/")
+    assert resp.status_code == 200, resp.status_code
+    html = resp.get_data(as_text=True)
+    for needle in ("htmx.min.js", "uplot.min.js", "dashboard.css"):
+        assert needle in html, f"missing asset ref {needle}"
+    for interval in ("every 5s", "every 10s", "every 30s"):
+        assert interval in html, f"missing poll {interval}"
+    return "assets linked, 5s/10s/30s polls"
+
+
+def check_partials():
+    for path in ("/partials/cards", "/partials/species", "/partials/heatmap"):
+        resp = client().get(path)
+        assert resp.status_code == 200, f"{path} -> {resp.status_code}"
+        assert len(resp.get_data()) > 100, f"{path} body too small"
+    return "cards/species/heatmap OK"
+
+
+def check_heatmap():
+    started = time.perf_counter()
+    resp = client().get("/heatmap.png")
+    elapsed = time.perf_counter() - started
+    assert resp.status_code == 200, resp.status_code
+    png = resp.get_data()
+    assert png.startswith(b"\x89PNG\r\n\x1a\n"), "not a PNG"
+    assert len(png) > 1000, f"{len(png)} B"
+    assert elapsed <= 3.0, f"{elapsed:.2f}s > 3s budget"
+    return f"{len(png)} B in {elapsed * 1000:.0f} ms"
+
+
+def check_ingest():
+    before = counts()["readings"]
+    payload = {"temperature": 24.0, "humidity": 85.0, "lux": 100.0, "x": 7.0, "y": 3.0, "node_id": "verify"}
+    resp = client().post("/api/ingest", json=payload)
+    assert resp.status_code < 300, f"{resp.status_code}: {resp.get_data(as_text=True)[:200]}"
+    assert counts()["readings"] >= before + 1, "ingest did not persist a reading"
+    return f"{resp.status_code} accepted"
+
+
+def check_assets():
+    raw = sum((ROOT / a).stat().st_size for a in ASSETS)
+    gz = sum(len(gzip.compress((ROOT / a).read_bytes(), 9)) for a in ASSETS)
+    png = ROOT / "static" / "heatmap.png"
+    transferred = gz + (png.stat().st_size if png.exists() else 0)
+    assert raw <= 100_000, f"vendor assets {raw} B > 100 KB on disk"
+    assert transferred <= 100_000, f"{transferred} B transferred > 100 KB"
+    return f"{raw / 1000:.1f} KB on disk, {transferred / 1000:.1f} KB transferred"
+
+
+def check_parametric():
+    import yaml
+
+    cfg = yaml.safe_load((ROOT / "config.yaml").read_text(encoding="utf-8")) or {}
+    cfg.setdefault("species", {})["mode"] = "parametric"
+    with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False, encoding="utf-8") as fh:
+        yaml.safe_dump(cfg, fh)
+        cfg_path = fh.name
+    env = os.environ.copy()
+    env["FUNGI_CONFIG"] = cfg_path
+    code = (
+        "import json; from app.models.species import predict_species; "
+        "print(json.dumps(predict_species(23.0, 88.0, 100.0)))"
+    )
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    finally:
+        Path(cfg_path).unlink(missing_ok=True)
+    assert proc.returncode == 0, (proc.stderr or proc.stdout).strip()[-500:]
+    preds = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert len(preds) == 5, f"{len(preds)} predictions, want 5"
+    suit = [p["suitability"] for p in preds]
+    assert suit == sorted(suit, reverse=True), "not ranked desc"
+    assert all(0.0 <= s <= 1.0 for s in suit), suit
+    return f"no-ML top-5, best={preds[0]['species']} {suit[0]:.2f}"
+
+
+def check_guardrails():
+    import re
+
+    code_pattern = re.compile(r"^\s*(?:import|from)\s+(cv2|torch|tensorflow|tflite_runtime)\b", re.M)
+    template_pattern = re.compile(r"\bdetected\b", re.I)
+    remote_pattern = re.compile(r"<(?:script|link)[^>]+(?:https?:)?//", re.I)
+    offenders: list[str] = []
+    for path in sorted((ROOT / "app").rglob("*.py")) + sorted((ROOT / "scripts").rglob("*.py")):
+        if code_pattern.search(path.read_text(encoding="utf-8", errors="ignore")):
+            offenders.append(f"{path.relative_to(ROOT)} imports vision/ML framework")
+    for path in sorted((ROOT / "app" / "templates").rglob("*.html")):
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        if template_pattern.search(text):
+            offenders.append(f"{path.relative_to(ROOT)} says 'detected'")
+        if remote_pattern.search(text):
+            offenders.append(f"{path.relative_to(ROOT)} fetches a remote asset")
+    assert not offenders, "; ".join(offenders)
+    return "no camera/SPA/CDN, no 'detected' copy"
+
+
+CHECKS = (
+    ("schema", check_schema),
+    ("sampler", check_sampler),
+    ("api/latest", check_api_latest),
+    ("api/series", check_api_series),
+    ("dashboard", check_dashboard),
+    ("partials", check_partials),
+    ("heatmap.png <=3s", check_heatmap),
+    ("api/ingest", check_ingest),
+    ("static budget", check_assets),
+    ("parametric fallback", check_parametric),
+    ("guardrails", check_guardrails),
+)
+
+
+def main(argv: list[str]) -> int:
+    verbose = any(a in {"-v", "--verbose"} for a in argv[1:])
+    tmp = tempfile.TemporaryDirectory(prefix="fungi-verify-")
+    os.environ["FUNGI_DB"] = str(Path(tmp.name) / "verify.db")
+    os.environ["FUNGI_SIMULATE"] = "1"
+
+    failures = 0
+    for name, fn in CHECKS:
+        try:
+            detail = fn()
+        except Exception as exc:
+            failures += 1
+            print(f"FAIL  {name}: {type(exc).__name__}: {exc}")
+        else:
+            suffix = f"  [{detail}]" if verbose and detail else ""
+            print(f"PASS  {name}{suffix}")
+
+    total = len(CHECKS)
+    print(f"\n{total - failures}/{total} passed")
+    if failures:
+        print("Manual checks left to a human: reboot persistence, Bluetooth PAN reachability.")
+    tmp.cleanup()
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

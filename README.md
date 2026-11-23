@@ -34,6 +34,9 @@ project spec) — clone it there, or edit the unit paths.
 - [Limitations](#limitations)
 - [Troubleshooting](#troubleshooting)
 
+`docs/SPEC.md` holds the original contract verbatim; `AGENTS.md` is the working
+agreement for future coding sessions.
+
 ---
 
 ## BOM
@@ -448,6 +451,14 @@ purely an access path.
 ---
 
 ## Verification against the acceptance criteria
+
+One command covers the automatable criteria (throwaway DB, simulated sensors):
+
+```bash
+python scripts/verify.py -v    # 11/11 passed, ~10 s
+```
+
+The manual walkthrough below is for checking a live deployment by hand:
 
 ```bash
 # 1. schema
