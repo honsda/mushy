@@ -319,12 +319,12 @@ window as the map.
 | `dashboard.css` | 3,627 B | 1,310 B |
 | `uplot.min.css` | 1,883 B | 768 B |
 | **Total JS + CSS** | **99,636 B** | **37,611 B** |
-| `heatmap.png` (generated) | ~25 KB | ~25 KB |
+| `heatmap.png` (generated) | 9–38 KB | same |
 | dashboard HTML (gzip) | — | ~3 KB |
 
-Full dashboard transfer in devtools is roughly **65 KB** including the heatmap
-and gzipped HTML. The heatmap is palette-quantised and downscaled to stay small
-even when the interpolated field is detailed.
+Full dashboard transfer in devtools is roughly **50–80 KB** including the
+generated heatmap and gzipped HTML. The heatmap is palette-quantised and
+downscaled to stay small even when the interpolated field is detailed.
 
 Rebuild the CSS on a dev machine (Node is **not** installed or needed on the
 Pi):
@@ -332,6 +332,9 @@ Pi):
 ```bash
 bash scripts/build_tailwind.sh
 ```
+
+Vendored library licenses are recorded in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ---
 
