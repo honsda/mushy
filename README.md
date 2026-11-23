@@ -28,7 +28,11 @@ project spec) — clone it there, or edit the unit paths.
 - [HTTP API](#http-api)
 - [Dashboard](#dashboard)
 - [Models](#models)
+- [East Java regionalization](#east-java-regionalization)
+- [Supervised labelling](#supervised-labelling)
 - [Training the RandomForest](#training-the-randomforest)
+- [Retraining workflow](#retraining-workflow)
+- [Resource budget on a Pi 4](#resource-budget-on-a-pi-4)
 - [Dataset check](#dataset-check-fgpi-calibration)
 - [Bluetooth PAN](#bluetooth-pan)
 - [Verification](#verification-against-the-acceptance-criteria)
@@ -125,13 +129,17 @@ mushy/                         # deployed as fungi-forecast/
 │   ├── verify.py              # one-command §15 acceptance gate
 │   ├── sample_loop.py         # 30 s sampling daemon
 │   └── init_db.py
-├── docs/SPEC.md               # original brief, verbatim
+├── docs/                      # SPEC.md, calibration.md, retraining.md
+│   └── SPEC.md               # original brief, verbatim
 ├── AGENTS.md                  # working agreement for coding sessions
 ├── systemd/
 │   ├── fungi-server.service
 │   └── fungi-sampler.service
 ├── config.yaml
 ├── requirements.txt
+├── requirements-dev.txt         # + pytest, dev/CI only
+├── tests/                       # pytest: fgpi, species, db, api
+├── .github/workflows/ci.yml     # compile + pytest + budget guardrails
 └── README.md
 ```
 
@@ -165,6 +173,8 @@ python scripts/init_db.py
 
 `requirements.txt` uses platform markers, so the same file also installs on a
 Windows/macOS development machine without trying to build GPIO packages.
+On a dev machine `pip install -r requirements-dev.txt` adds pytest; the Pi does
+not need it.
 
 Pin the Python version you tested (3.11+). On a Pi 5, Blinka is required; the
 DHT driver is instantiated with `use_pulseio=False`, which is the reliable path
@@ -189,12 +199,23 @@ on modern kernels.
 | `spatial.fixed_node_position` | `[5.0, 4.0]` | known node coordinates; `null` stores no x/y |
 | `spatial.window_hours` | `6` | data window used for the map |
 | `server.host`, `server.port` | `0.0.0.0`, `5000` | Flask bind address |
+| `sensors.temp_offset`, `humidity_offset`, `lux_scale` | `0.0`, `0.0`, `1.0` | calibration, see [docs/calibration.md](docs/calibration.md) |
 | `species.mode` | `auto` | `auto` = RF if joblib exists, else parametric |
+| `species.region` | `east_java` | applies `species_curves_indonesia.json` |
+| `species.model_path` | `""` | explicit joblib; empty = `species_rf_east_java.joblib` if present |
 | `species.top_k` | `5` | ranked species returned/persisted |
-| `database.path` | `fungi.db` | relative to the project root |
+| `species.blend_sgd_weight` | `0.3` | RF/SGD blend after on-device learning |
+| `species.min_new_labels` | `20` | labels required before a nightly `partial_fit` |
+| `server.auth.ingest_token` | `""` | bearer token for writes; empty = open LAN demo |
+| `server.auth.ingest_rate_limit_seconds` | `5` | per-node ingest interval, `429` beyond |
+| `server.auth.allow_dashboard_labels` | `true` | operator's own browser may POST labels |
+| `alerts.enabled` | `false` | webhook/SMTP notifications on risk change |
+| `ui.transport` | `poll` | `sse` switches the dashboard to `/stream` |
+| `database.prune_days` | `90` | retention used by the maintenance timer |
 
 Environment overrides: `FUNGI_CONFIG`, `FUNGI_DB`, `FUNGI_SIMULATE=1`,
-`FUNGI_HOST`, `FUNGI_PORT`, `FUNGI_NODE_ID`.
+`FUNGI_HOST`, `FUNGI_PORT`, `FUNGI_NODE_ID`, `MUSHY_INGEST_TOKEN` (wins over
+`server.auth.ingest_token`).
 
 ---
 
@@ -250,6 +271,25 @@ The units assume user `pi` and `/home/pi/fungi-forecast/.venv/bin/python`.
 Change `User=`, `Group=`, `WorkingDirectory=`, and `ExecStart=` if your user or
 path differs. Both services restart automatically and survive a reboot.
 
+Two optional timers keep the data bounded and the model current:
+
+```bash
+sudo cp systemd/fungi-incremental.* systemd/fungi-maintenance.* /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now fungi-incremental.timer fungi-maintenance.timer
+
+systemctl list-timers 'fungi-*' --no-pager
+```
+
+| Timer | When | Does |
+|---|---|---|
+| `fungi-incremental.timer` | nightly 02:00 (`Persistent=true`) | `scripts/incremental_update.py` — absorbs new labels into the SGD adapter |
+| `fungi-maintenance.timer` | Sunday 03:30 | `scripts/db_maintenance.py --prune-days 90 --backup ~/backups --vacuum` |
+
+Both are `Type=oneshot`, low priority and skip work rather than compete with
+the sampler. The incremental run exits 0 even when it skips, so a quiet week
+does not turn the unit red.
+
 ---
 
 ## HTTP API
@@ -265,7 +305,19 @@ path differs. Both services restart automatically and survive a reboot.
 | GET | `/api/maps` | layer metadata for the dropdown (`key`, `label`, `unit`, `url`) |
 | GET | `/heatmap.png` | FGPI PNG (alias of `/maps/fgpi.png`, kept for the spec URL) |
 | GET | `/maps/<layer>.png` | PNG for `fgpi`, `temperature`, `humidity` or `lux` (`404` otherwise) |
-| POST | `/api/ingest` | accept a remote-node reading (JSON) |
+| POST | `/api/ingest` | accept a remote-node reading (JSON, bearer token) |
+| POST | `/api/labels` | record a manual observation (present/absent) |
+| GET | `/api/labels?since=ISO` | labels with their joined reading |
+| GET | `/api/labels/export.csv` | labels + `temperature`/`humidity`/`lux` for retraining |
+| GET | `/api/nodes` | per-node age, status (`green`/`amber`/`red`), latest FGPI |
+| GET | `/api/export.csv?table=readings&from=…&to=…` | streaming CSV, whitelisted tables |
+| GET | `/stream` | SSE push (only when `ui.transport: sse`) |
+
+Writes require `Authorization: Bearer $MUSHY_INGEST_TOKEN` once a token is
+configured; reads stay open on the LAN. Repeat ingests from the same node
+inside `ingest_rate_limit_seconds` get `429` with `Retry-After`. Payloads are
+validated in `app/schemas.py`: temperature −40…80 °C, RH 0…100 %, lux
+0…200000 or `-1`, `node_id` `[A-Za-z0-9_-]{1,32}`.
 
 ### Map layers
 
@@ -423,6 +475,66 @@ rounded literature midpoints for **ranking**, not clinical or regulatory advice.
 
 ---
 
+## East Java regionalization
+
+The global curve table describes organisms, not a place. Setting
+`species.region: east_java` overlays `app/models/trained/species_curves_indonesia.json`
+on top of it: per-species `T_opt`/`RH_opt` shifts from Indonesian and Javanese
+strain literature, plus two species absent from the global table —
+*Aspergillus flavus* (12/30/42 °C, 75/90 %RH) and *Fusarium oxysporum*
+(10/25/35 °C, 80/90 %RH) — both common in East Java maize and soybean residues.
+
+The overlay is additive and auditable: `_apply_overlay()` merges per field, so
+a curve keeps every global parameter it does not override, and it names its
+sources in `_comment`.
+
+Train a region-filtered model:
+
+```bash
+python scripts/fetch_regional_data.py --filter training_data_species.csv \
+  --out data/regional/aspergillus_indonesia.csv     # bbox -8.8,-6.5,111,115
+python scripts/train_species.py --data data/regional/aspergillus_indonesia.csv \
+  --region east_java --cv 5
+```
+
+`--region east_java` requires latitude/longitude columns: without them the
+script refuses to pretend a global file is regional. The run reports 5-fold
+macro-F1 and writes `species_rf_east_java.meta.json` with provenance, class
+counts, feature ranges and the CV report. At runtime `confidence: high` means
+"a trained model answered and this input is inside those feature ranges"; an
+input outside them is downgraded to `low` regardless of the score.
+
+GBIF (`fetch_regional_data.py --gbif`) gives occurrence records for the bbox.
+Those carry no temperature or humidity, so they validate *presence*, not
+growth — they are deliberately not used as a training set.
+
+---
+
+## Supervised labelling
+
+Species predictions are **predicted suitability**, never detections. The Pi
+has no camera and does no visual identification. What it can do is record what
+an operator saw: each species row has a **record sighting** disclosure with
+`✓ present` / `✗ absent`, a 1–5 confidence and an optional note. Rows land in
+the `labels` table joined to the reading that was live at that moment, so a
+label is always attributable to the T/RH/lux that produced it.
+
+```bash
+curl -s http://localhost:5000/api/labels | python -m json.tool
+curl -s "http://localhost:5000/api/labels/export.csv?since=2025-01-01" -o labels.csv
+```
+
+The form posts from the operator's browser without the ingest token in page
+source; `server.auth.allow_dashboard_labels` permits same-origin posts and
+everything else still needs the bearer token. Labels are the only training data
+this project produces — see [docs/retraining.md](docs/retraining.md) for the
+export → merge → train → compress → deploy loop. `merge_training_data.py`
+converts an `absent` into a negative class only when another species was
+marked present at that same reading, so "nobody looked" is never recorded as
+"not there".
+
+---
+
 ## Training the RandomForest
 
 Training runs on a development machine only; the Pi never trains at runtime.
@@ -450,6 +562,51 @@ shipped literature curves; it is convenient for testing the ML code path but is
 The default repo ships **no** joblib model, so a fresh install uses the
 parametric tier. That is intentional: a curve-bootstrap model is not evidence of
 real-world accuracy.
+
+---
+
+## Retraining workflow
+
+[docs/retraining.md](docs/retraining.md) is the full runbook; the short form:
+
+```bash
+curl -s "http://pi:5000/api/labels/export.csv?since=2025-01-01" -o labels.csv
+python scripts/merge_training_data.py --base data/regional/aspergillus_indonesia.csv \
+  --labels labels.csv --out data/regional/combined.csv
+python scripts/train_species.py --data data/regional/combined.csv --region east_java --cv 5
+python scripts/compress_model.py --in app/models/trained/species_rf_east_java.joblib \
+  --data data/regional/combined.csv --out app/models/trained/species_rf_east_java.min.joblib
+```
+
+`compress_model.py` rejects the compressed model (exit 2) when macro-F1 drops
+more than 2 points, and in lossless mode makes no accuracy claim at all. The
+loader hot-reloads on joblib mtime.
+
+On-device adaptation uses an `SGDClassifier` adapter rather than retraining the
+forest on the Pi: `partial_fit` on new labels at 02:00, blended 0.3/0.7 with the
+RF posterior, guarded by ≥20 new labels, ≥300 MB free RAM and SoC <70 °C. Every
+run logs one line to `logs/incremental.log`.
+
+---
+
+## Resource budget on a Pi 4
+
+Measured with `python scripts/check_budget.py` (advisory; `--strict` to fail).
+
+| Item | Target (spec §7) | This build |
+|---|---|---|
+| Idle RSS, Flask + numpy + matplotlib | ≤ 300 MB | ~150 MB |
+| Map render (100×100 grid, 14 sites) | ≤ 3 s | 0.2–1.6 s |
+| `/api/latest` | ≤ 200 ms | ~10 ms |
+| Static assets transferred | < 110 KB | 99.6 KB on disk, ~58 KB gzipped + one map |
+| Sampler cadence | 30 s | 30 s, a few % of one core |
+| Nightly SGD `partial_fit` | < 5 s, < 300 MB | seconds; skipped when idle |
+
+The budget script measures the live process rather than trusting the design:
+idle RSS, asset bytes, heatmap wall time and `/api/latest` latency over ten
+calls. In CI it runs with `continue-on-error: true` so a slow shared runner
+never blocks a merge, while a regression on the Pi is still visible in
+`journalctl`.
 
 ---
 
@@ -538,7 +695,8 @@ purely an access path.
 One command covers the automatable criteria (throwaway DB, simulated sensors):
 
 ```bash
-python scripts/verify.py -v    # 14/14 passed, ~15 s
+python scripts/verify.py -v    # 20/20 passed, ~20 s
+python -m pytest tests -q      # 34 unit/API tests, no hardware
 ```
 
 The manual walkthrough below is for checking a live deployment by hand:
@@ -546,7 +704,7 @@ The manual walkthrough below is for checking a live deployment by hand:
 ```bash
 # 1. schema
 python scripts/init_db.py
-sqlite3 fungi.db ".tables"     # fgpi readings species_predictions
+sqlite3 fungi.db ".tables"     # alerts_log fgpi labels readings species_predictions
 
 # 2. one sample (hardware, or add FUNGI_SIMULATE=1 on a bench)
 python scripts/sample_loop.py --once

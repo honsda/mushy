@@ -7,7 +7,7 @@ training, BT PAN. Load only the section you need.
 ## Token discipline (keeps quality, cuts cost)
 
 1. **Verify, don't narrate.** `python scripts/verify.py` is the whole §15 gate
-   (14 checks, ~15 s). Paste its output instead of hand-running curls.
+   (20 checks, ~20 s). Paste its output instead of hand-running curls.
 2. **Grep before you read.** `rg -n "pattern" app/` beats opening whole files.
    Only read a file when you are about to edit it, and read the region you edit.
 3. **One edit call per file.** Batch all changes to a file into a single `edit`
@@ -27,6 +27,12 @@ training, BT PAN. Load only the section you need.
 | SQLite helpers + schema | `app/db.py` |
 | FGPI formula | `app/models/fgpi.py` |
 | Species ML/parametric | `app/models/species.py`, `app/models/trained/species_curves.json` |
+| East Java overlay | `app/models/trained/species_curves_indonesia.json` |
+| SGD adapter (nightly) | `app/models/species_sgd.py`, `scripts/incremental_update.py` |
+| Ingest/label validation | `app/schemas.py` |
+| Alerts (webhook/SMTP) | `app/alerts.py` |
+| Tests | `tests/` (pytest, throwaway DB) |
+| Calibration / retraining docs | `docs/calibration.md`, `docs/retraining.md` |
 | IDW/cubic grid | `app/spatial/interpolate.py` |
 | Matplotlib PNG | `app/spatial/heatmap.py` (renders any layer) |
 | Map layer specs (units, ramps, domains) | `app/spatial/layers.py` |
@@ -38,7 +44,11 @@ training, BT PAN. Load only the section you need.
 ## Commands
 
 ```bash
-python scripts/verify.py -v          # full acceptance gate (14 checks)
+python scripts/verify.py -v          # full acceptance gate (20 checks)
+python -m pytest tests -q            # unit/API tests, no hardware
+python scripts/check_budget.py       # advisory RSS/latency/asset budget
+python scripts/db_maintenance.py --prune-days 90 --backup backups --vacuum
+python scripts/compress_model.py --in M.joblib --data combined.csv --out M.min.joblib
 python scripts/dataset_check.py      # FGPI vs ASHRAE/Hukka-Viitanen reference
 FUNGI_SIMULATE=1 python scripts/sample_loop.py --once
 FUNGI_SIMULATE=1 python -m flask --app app.server:create_app run   # dev server
@@ -50,12 +60,16 @@ python scripts/train_species.py      # offline, dev machine only
 - Signatures in `docs/SPEC.md` §7 are frozen; downstream code depends on them.
 - No camera/image ML, no SPA, no CDN/cloud at runtime, no npm on the Pi.
 - Copy says "predicted suitability", never "detected".
-- Frontend budget: <100 KB transferred (currently ~46.6 KB gzipped + heatmap).
+- Frontend budget: <100 KB transferred (currently ~58 KB gzipped + one map).
 - Sensors fail open: `read_lux()` returns `-1.0`; sampler logs and skips.
 - Partials poll independently (5 s cards / 10 s species / 30 s map); never
   reload the whole document. The map layer travels in the poll URL, because
   htmx inherits `hx-vals` from ancestors and would clobber the dropdown.
 - Adding a map layer = one entry in `app/spatial/layers.py`; nothing else changes.
+- Writes need the bearer token when configured; reads stay open on the LAN.
+- Labels are manual observations only. Never derive them from an image.
+- New optional work (alerts, SGD, SSE) must skip cleanly, never raise into a
+  request or a timer: log and continue.
 
 ## Not automatable — a human on the Pi must check
 

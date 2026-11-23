@@ -16,16 +16,21 @@ from __future__ import annotations
 
 import json
 import threading
+from pathlib import Path
 from typing import Any
 
 from app import MODEL_DIR, load_config
 
 CURVES_PATH = MODEL_DIR / "species_curves.json"
 RF_PATH = MODEL_DIR / "species_rf.joblib"
+# Optional East Java overlay: loaded after the base table and merged per species.
+CURVES_INDONESIA_PATH = MODEL_DIR / "species_curves_indonesia.json"
+REGION = "east_java"
 
 _lock = threading.Lock()
-_curves_cache: tuple[float, list[dict]] | None = None
-_model_cache: tuple[float, Any] | None = None
+_curves_cache: tuple[tuple[float, float | None, str], list[dict]] | None = None
+_model_cache: tuple[tuple[str, float], Any] | None = None
+_meta_cache: tuple[tuple[str, float], dict] | None = None
 
 # Last-resort curves if the JSON is missing/corrupt. Kept in sync with the
 # shipped seed table so the API can always return a ranked top-5.
@@ -45,13 +50,55 @@ _FALLBACK_CURVES = [
 ]
 
 
+def region() -> str:
+    """Configured region: `default` (global curves) or `east_java` (overlay)."""
+    return str(load_config().get("species", {}).get("region") or "default").lower()
+
+
+def _apply_overlay(base: list[dict], overlay: dict) -> list[dict]:
+    """Merge the regional overlay into the base curves, per species name.
+
+    Overlay entries may be partial (only the parameters a regional study
+    pins down); everything else keeps the global value. Unknown species are
+    appended so a regional-only record is not silently dropped.
+    """
+    species_overlay = (overlay or {}).get("species") or overlay or {}
+    if not isinstance(species_overlay, dict):
+        return base
+    merged: list[dict] = []
+    seen: set[str] = set()
+    for curve in base:
+        name = str(curve.get("name", ""))
+        override = species_overlay.get(name)
+        if isinstance(override, dict):
+            merged.append({**curve, **override, "name": name})
+            seen.add(name)
+        else:
+            merged.append(curve)
+    for name, override in species_overlay.items():
+        if name in seen or not isinstance(override, dict):
+            continue
+        entry = {"name": name, **override}
+        if all(key in entry for key in ("T_min", "T_opt", "T_max", "RH_min", "RH_opt")):
+            merged.append(entry)
+    return merged
+
+
 def _load_curves() -> list[dict]:
     global _curves_cache
+    current_region = region()
     try:
         mtime = CURVES_PATH.stat().st_mtime
     except OSError:
         return _FALLBACK_CURVES
-    if _curves_cache and _curves_cache[0] == mtime:
+    overlay_mtime: float | None = None
+    if current_region == REGION:
+        try:
+            overlay_mtime = CURVES_INDONESIA_PATH.stat().st_mtime
+        except OSError:
+            overlay_mtime = None
+    cache_key = (mtime, overlay_mtime, current_region)
+    if _curves_cache and _curves_cache[0] == cache_key:
         return _curves_cache[1]
     try:
         with CURVES_PATH.open("r", encoding="utf-8") as fh:
@@ -60,25 +107,67 @@ def _load_curves() -> list[dict]:
         if not isinstance(curves, list) or not curves:
             raise ValueError("species list empty")
     except (OSError, ValueError, KeyError, json.JSONDecodeError):
-        curves = _FALLBACK_CURVES
-    _curves_cache = (mtime, curves)
+        curves = [dict(c) for c in _FALLBACK_CURVES]
+    if current_region == REGION and overlay_mtime is not None:
+        try:
+            with CURVES_INDONESIA_PATH.open("r", encoding="utf-8") as fh:
+                curves = _apply_overlay(curves, json.load(fh))
+        except (OSError, ValueError, json.JSONDecodeError):
+            pass
+    _curves_cache = (cache_key, curves)
     return curves
+
+
+def _model_path():
+    """Regional model if configured, else the default joblib path."""
+    species_cfg = load_config().get("species", {})
+    configured = species_cfg.get("model_path")
+    if configured:
+        path = Path(str(configured))
+        if not path.is_absolute():
+            path = MODEL_DIR.parent.parent / path if str(configured).startswith("app/") else MODEL_DIR / path
+        return path
+    if region() == REGION:
+        regional = MODEL_DIR / "species_rf_east_java.joblib"
+        if regional.exists():
+            return regional
+    return RF_PATH
+
+
+def _meta() -> dict:
+    """Training metadata (feature ranges, CV scores) for confidence scoring."""
+    global _meta_cache
+    path = _model_path().with_suffix(".meta.json")
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return {}
+    if _meta_cache and _meta_cache[0] == (str(path), mtime):
+        return _meta_cache[1]
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            meta = json.load(fh)
+    except (OSError, ValueError, json.JSONDecodeError):
+        meta = {}
+    _meta_cache = ((str(path), mtime), meta if isinstance(meta, dict) else {})
+    return _meta_cache[1]
 
 
 def _load_model() -> Any | None:
     """Load the RandomForest once; hot-reload if the joblib file changes."""
     global _model_cache
+    path = _model_path()
     try:
-        mtime = RF_PATH.stat().st_mtime
+        mtime = path.stat().st_mtime
     except OSError:
         return None
-    if _model_cache and _model_cache[0] == mtime:
+    if _model_cache and _model_cache[0] == (str(path), mtime):
         return _model_cache[1]
     try:
         import joblib  # type: ignore
 
-        model = joblib.load(RF_PATH)
-        _model_cache = (mtime, model)
+        model = joblib.load(path)
+        _model_cache = ((str(path), mtime), model)
         return model
     except Exception:
         return None
@@ -132,11 +221,38 @@ def _parametric(T: float, RH: float, L: float | None) -> list[dict]:
             )
             l_factor = _lux_membership(L, curve.get("lux_pref"))
             score = max(0.0, min(1.0, t_factor * rh_factor * l_factor))
-            ranked.append({"species": str(curve["name"]), "suitability": round(score, 4)})
+            # Inside the niche envelope both memberships are comfortably above
+            # zero; near an edge the parametric score is a guess, so say so.
+            on_edge = min(t_factor, rh_factor) < 0.15
+            ranked.append(
+                {
+                    "species": str(curve["name"]),
+                    "suitability": round(score, 4),
+                    "confidence": "low" if on_edge else "medium",
+                }
+            )
         except (KeyError, TypeError, ValueError):
             continue
     ranked.sort(key=lambda item: (-item["suitability"], item["species"]))
     return ranked
+
+
+def _in_training_range(T: float, RH: float, L: float | None) -> bool | None:
+    """True/False when the model ships feature ranges, None when unknown."""
+    ranges = (_meta().get("feature_ranges") or {}) if _meta() else {}
+    if not ranges:
+        return None
+    checks = [("temperature", T), ("humidity", RH)]
+    if L is not None and L >= 0:
+        checks.append(("lux", L))
+    for name, value in checks:
+        bounds = ranges.get(name)
+        if not isinstance(bounds, (list, tuple)) or len(bounds) != 2:
+            continue
+        low, high = float(bounds[0]), float(bounds[1])
+        if not (low <= value <= high):
+            return False
+    return True
 
 
 def _ml(T: float, RH: float, L: float | None) -> list[dict] | None:
@@ -147,8 +263,12 @@ def _ml(T: float, RH: float, L: float | None) -> list[dict] | None:
         lux = float(L) if L is not None and L >= 0 else 0.0
         proba = model.predict_proba([[T, RH, lux]])[0]
         classes = list(getattr(model, "classes_", []))
+        in_range = _in_training_range(T, RH, L)
+        # An ML model asked about conditions it never saw reports high numbers
+        # with no evidence behind them; confidence must not inherit that.
+        confidence = "high" if in_range is not False else "low"
         ranked = [
-            {"species": str(name), "suitability": round(float(score), 4)}
+            {"species": str(name), "suitability": round(float(score), 4), "confidence": confidence}
             for name, score in zip(classes, proba)
         ]
         ranked.sort(key=lambda item: (-item["suitability"], item["species"]))
@@ -157,8 +277,50 @@ def _ml(T: float, RH: float, L: float | None) -> list[dict] | None:
         return None
 
 
+def _sgd_proba(T: float, RH: float, L: float | None) -> dict[str, float] | None:
+    """Incremental adapter probabilities, or None when disabled/absent."""
+    cfg = load_config().get("species", {})
+    if not (cfg.get("sgd") or {}).get("enabled", True):
+        return None
+    try:
+        from app.models import species_sgd  # local import: optional dependency path
+
+        proba = species_sgd.predict_proba(T, RH, L)
+    except Exception:
+        return None
+    return proba or None
+
+
+def _blend(ranked: list[dict], sgd: dict[str, float], weight: float) -> list[dict]:
+    """Weighted average of the SGD adapter and the RF/parametric posterior."""
+    weight = max(0.0, min(1.0, float(weight)))
+    blended: list[dict] = []
+    for entry in ranked:
+        name = entry["species"]
+        rf_score = float(entry.get("suitability") or 0.0)
+        score = (1.0 - weight) * rf_score + weight * float(sgd.get(name, 0.0))
+        blended.append({**entry, "suitability": round(max(0.0, min(1.0, score)), 4)})
+    for name, score in sgd.items():
+        if not any(e["species"] == name for e in blended):
+            blended.append(
+                {
+                    "species": name,
+                    "suitability": round(weight * float(score), 4),
+                    "confidence": "medium",
+                }
+            )
+    blended.sort(key=lambda item: (-item["suitability"], item["species"]))
+    return blended
+
+
 def predict_species(T: float, RH: float, L: float = -1.0) -> list[dict]:
-    """Return [{'species': str, 'suitability': float}, ...] sorted desc, top-5."""
+    """Return [{'species', 'suitability', 'confidence'}, ...] sorted desc, top-5.
+
+    Confidence is a property of the evidence, not of the number:
+      high    - trained model, input inside its training feature range
+      medium  - parametric curves, input comfortably inside the niche
+      low     - input near/outside the envelope, or a model extrapolating
+    """
     cfg = load_config().get("species", {})
     top_k = max(1, min(10, int(cfg.get("top_k", 5))))
     mode = str(cfg.get("mode", "auto")).lower()
@@ -179,15 +341,42 @@ def predict_species(T: float, RH: float, L: float = -1.0) -> list[dict]:
             ranked = _ml(t, rh, lux)
         if ranked is None:
             ranked = _parametric(t, rh, lux)
+        sgd = _sgd_proba(t, rh, lux)
+        if ranked and sgd:
+            ranked = _blend(ranked, sgd, cfg.get("blend_sgd_weight", 0.3))
 
     if not ranked:
-        ranked = [{"species": c["name"], "suitability": 0.0} for c in _load_curves()]
+        ranked = [
+            {"species": c["name"], "suitability": 0.0, "confidence": "low"}
+            for c in _load_curves()
+        ]
     return ranked[:top_k]
+
+
+def confidence_for(species_name: str, T: float, RH: float, L: float = -1.0) -> str:
+    """Confidence for an already-stored prediction (dashboard backfill)."""
+    ranked = predict_species(T, RH, L)
+    for entry in ranked:
+        if entry["species"] == species_name:
+            return str(entry.get("confidence") or "low")
+    return "low"
 
 
 def backend_name() -> str:
     """Human-readable backend label for the dashboard."""
     mode = str(load_config().get("species", {}).get("mode", "auto")).lower()
+    label = "parametric curves"
     if mode != "parametric" and _load_model() is not None:
-        return "RandomForest (joblib)"
-    return "parametric curves"
+        label = "RandomForest (joblib)"
+    sgd_enabled = bool((load_config().get("species", {}).get("sgd") or {}).get("enabled", True))
+    if sgd_enabled:
+        try:
+            from app.models import species_sgd
+
+            if species_sgd.available():
+                label += " + SGD adapter"
+        except Exception:
+            pass
+    if region() == REGION:
+        label += " [east_java]"
+    return label

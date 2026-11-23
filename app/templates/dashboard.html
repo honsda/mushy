@@ -16,6 +16,12 @@
         <p class="text-sm text-slate-500">Predicted growth potential &middot; predicted species suitability &middot; not detection</p>
       </div>
       <div class="flex flex-wrap items-center gap-2 text-sm">
+        <a class="rounded-full bg-white px-3 py-1 text-xs font-medium text-slate-700 shadow-sm hover:text-emerald-700"
+           href="{{ url_for('api_export_csv', table='readings') }}"
+           title="Last 7 days of readings as CSV">export CSV</a>
+        <a class="rounded-full bg-white px-3 py-1 text-xs font-medium text-slate-700 shadow-sm hover:text-emerald-700"
+           href="{{ url_for('api_labels_export') }}"
+           title="Human observations as CSV for retraining">labels CSV</a>
         <span class="inline-flex items-center gap-2 rounded-full bg-white px-3 py-1 shadow-sm">
           <span class="h-2 w-2 rounded-full bg-emerald-500"></span>
           <span>{{ connection }}</span>
@@ -24,7 +30,7 @@
       </div>
     </header>
 
-    <section id="cards" hx-get="{{ url_for('partial_cards') }}" hx-trigger="every 5s" hx-swap="innerHTML" aria-live="polite">
+    <section id="cards" hx-get="{{ url_for('partial_cards') }}" hx-trigger="every 5s" hx-swap="innerHTML" aria-live="polite"{% if cfg.ui.transport == 'sse' %} data-sse="{{ url_for('stream') }}"{% endif %}>
       {% include "partials/cards.html" %}
     </section>
 
@@ -43,6 +49,9 @@
           <span id="chart-status" class="text-xs text-slate-500">loading&hellip;</span>
         </div>
         <div id="chart" class="w-full" role="img" aria-label="Line chart of FGPI and relative humidity over the last six hours"></div>
+      </section>
+      <section class="md:col-span-3 mt-2">
+        {% include "partials/nodes.html" %}
       </section>
     </div>
 
@@ -101,6 +110,27 @@
 
       load();
       setInterval(load, 30000);
+
+      // Optional SSE transport (config ui.transport: sse).
+      var cards = document.getElementById("cards");
+      var sseUrl = cards && cards.getAttribute("data-sse");
+      if (sseUrl && window.EventSource) {
+        cards.removeAttribute("hx-trigger");
+        cards.removeAttribute("hx-get");
+        var source = new EventSource(sseUrl);
+        source.onmessage = function (event) {
+          if (event.data) { cards.innerHTML = event.data; }
+        };
+        source.onerror = function () {
+          // Network dropped: fall back to polling rather than showing stale data.
+          source.close();
+          setInterval(function () {
+            fetch("/partials/cards").then(function (r) { return r.text(); }).then(function (html) {
+              cards.innerHTML = html;
+            }).catch(function () {});
+          }, 5000);
+        };
+      }
     });
   </script>
 </body>

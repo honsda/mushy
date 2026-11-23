@@ -36,6 +36,7 @@ from app.db import (  # noqa: E402
 )
 from app.models.fgpi import compute_fgpi  # noqa: E402
 from app.models.species import predict_species  # noqa: E402
+from app.sensors import apply_calibration  # noqa: E402
 from app.sensors.dht22 import SensorError, read_temperature_humidity  # noqa: E402
 from app.sensors.light import read_lux  # noqa: E402
 
@@ -65,14 +66,15 @@ def sample_once(cfg: dict, node_id: str, position: tuple[float, float] | None) -
     reading = read_temperature_humidity()
     lux = read_lux()
     ts = int(time.time())
+    temperature, humidity, lux = apply_calibration(
+        cfg, reading["temperature"], reading["humidity"], lux
+    )
 
-    score, risk = compute_fgpi(reading["temperature"], reading["humidity"], lux)
-    species = predict_species(reading["temperature"], reading["humidity"], lux)
+    score, risk = compute_fgpi(temperature, humidity, lux)
+    species = predict_species(temperature, humidity, lux)
 
     x, y = (position if position is not None else (None, None))
-    reading_id = insert_reading(
-        ts, x, y, node_id, reading["temperature"], reading["humidity"], lux
-    )
+    reading_id = insert_reading(ts, x, y, node_id, temperature, humidity, lux)
     fgpi_id = insert_fgpi(reading_id, ts, score, risk)
     insert_species_predictions(fgpi_id, species)
 
@@ -80,8 +82,8 @@ def sample_once(cfg: dict, node_id: str, position: tuple[float, float] | None) -
         "ts": ts,
         "reading_id": reading_id,
         "fgpi_id": fgpi_id,
-        "temperature": reading["temperature"],
-        "humidity": reading["humidity"],
+        "temperature": temperature,
+        "humidity": humidity,
         "lux": lux,
         "fgpi": score,
         "risk_class": risk,

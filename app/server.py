@@ -2,20 +2,33 @@
 
 from __future__ import annotations
 
+import csv
 import gzip
+import io
 import logging
 import mimetypes
+import os
 import threading
 import time
 from pathlib import Path
 
-from flask import Flask, abort, jsonify, render_template, request, send_file
+from flask import (
+    Flask,
+    Response,
+    abort,
+    jsonify,
+    render_template,
+    request,
+    send_file,
+)
 from werkzeug.security import safe_join
 
 import app.db as db
 from app import STATIC_DIR, TEMPLATE_DIR, load_config
+from app.alerts import maybe_alert
 from app.models.fgpi import compute_fgpi
-from app.models.species import backend_name, predict_species
+from app.models.species import backend_name, confidence_for, predict_species
+from app.schemas import ValidationError, validate_label, validate_reading
 from app.spatial.heatmap import render_layer_png
 from app.spatial.interpolate import grid_data, grid_values
 from app.spatial.layers import DEFAULT_LAYER, LAYERS, get_layer, layer_keys
@@ -55,6 +68,51 @@ def _short_species(name: str) -> str:
     return cleaned
 
 
+def _parse_ts(value, default: int) -> int:
+    """Accept epoch seconds or an ISO-ish date/datetime; fall back silently."""
+    if value is None or value == "":
+        return int(default)
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        pass
+    for fmt in (
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d",
+    ):
+        try:
+            return int(time.mktime(time.strptime(str(value), fmt)))
+        except ValueError:
+            continue
+    return int(default)
+
+
+def _parse_day(value) -> int:
+    return _parse_ts(value, 0)
+
+
+def _csv_response(filename: str, columns: list[str], rows) -> Response:
+    """Stream CSV without materialising the whole table in memory."""
+
+    def generate():
+        buffer = io.StringIO()
+        writer = csv.DictWriter(buffer, fieldnames=columns, extrasaction="ignore")
+        writer.writeheader()
+        yield buffer.getvalue()
+        for row in rows:
+            buffer.seek(0)
+            buffer.truncate(0)
+            writer.writerow(row)
+            yield buffer.getvalue()
+
+    response = Response(generate(), mimetype="text/csv")
+    response.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 def _connection_label(remote_addr: str | None) -> str:
     if not remote_addr:
         return "Unknown"
@@ -85,10 +143,51 @@ def create_app(config_path: str | None = None) -> Flask:
     layer_paths = {key: STATIC_DIR / f"map-{key}.png" for key in layer_keys()}
     layer_state: dict[str, int] = {key: -1 for key in layer_keys()}
 
+    # ------------------------------------------------------------------- auth
+    # Writes always need a token when one is configured. Reads stay open on a
+    # trusted LAN unless the operator explicitly opts in (auth_reads).
+    auth_cfg = cfg.get("server", {}).get("auth", {}) or {}
+    ingest_token = os.environ.get("MUSHY_INGEST_TOKEN") or str(
+        auth_cfg.get("ingest_token") or ""
+    )
+    read_token = os.environ.get("MUSHY_READ_TOKEN") or str(auth_cfg.get("read_token") or "")
+    auth_reads = bool(auth_cfg.get("auth_reads", False)) and bool(read_token)
+    rate_limit_seconds = max(0.0, float(auth_cfg.get("ingest_rate_limit_seconds", 5)))
+    ingest_hits: dict[str, float] = {}
+
+    def _presented_token() -> str:
+        header = request.headers.get("Authorization", "")
+        if header.lower().startswith("bearer "):
+            return header[7:].strip()
+        return (
+            request.headers.get("X-API-Key")
+            or request.args.get("token")
+            or ""
+        ).strip()
+
+    def _token_ok(expected: str) -> bool:
+        import hmac
+
+        return hmac.compare_digest(_presented_token(), expected)
+
+    @app.before_request
+    def _guard_reads():
+        if not auth_reads:
+            return None
+        path = request.path or ""
+        if path.startswith(("/api/", "/partials/")) and not path.startswith("/api/ingest"):
+            if not _token_ok(read_token):
+                return jsonify({"error": "unauthorized"}), 401
+        return None
+
     @app.after_request
     def _compress_dynamic(response):
         """Gzip HTML/JSON too, so devtools counts the same small payload."""
-        if response.direct_passthrough or response.headers.get("Content-Encoding"):
+        if (
+            response.direct_passthrough
+            or response.is_streamed
+            or response.headers.get("Content-Encoding")
+        ):
             return response
         if "gzip" not in request.headers.get("Accept-Encoding", "").lower():
             return response
@@ -121,6 +220,22 @@ def create_app(config_path: str | None = None) -> Flask:
                 "species": [],
             }
         species = snap.get("species") or []
+        if species and any("confidence" not in entry for entry in species):
+            # Rows written before confidence existed get it computed from the
+            # reading they came from, so the UI never shows a blank column.
+            species = [
+                {
+                    **entry,
+                    "confidence": entry.get("confidence")
+                    or confidence_for(
+                        entry["species"],
+                        snap["temperature"],
+                        snap["humidity"],
+                        snap.get("lux", -1.0) or -1.0,
+                    ),
+                }
+                for entry in species
+            ]
         if not species:
             # Backfill for databases written before species were persisted.
             species = predict_species(
@@ -254,6 +369,7 @@ def create_app(config_path: str | None = None) -> Flask:
     def _template_context() -> dict:
         snap = _snapshot()
         active = _selected_layer()
+        interval = int(float(cfg.get("sampling", {}).get("interval_seconds", 30)))
         return {
             "latest": snap,
             "cfg": cfg,
@@ -264,6 +380,8 @@ def create_app(config_path: str | None = None) -> Flask:
             "active_layer": active,
             "layer": LAYERS[active],
             "layers": [LAYERS[k] for k in layer_keys()],
+            "nodes": db.node_status(interval),
+            "interval_seconds": interval,
         }
 
     # ------------------------------------------------------------- static files
@@ -397,53 +515,60 @@ def create_app(config_path: str | None = None) -> Flask:
 
     @app.post("/api/ingest")
     def api_ingest():
-        data = request.get_json(silent=True)
-        if not isinstance(data, dict):
-            return jsonify({"error": "JSON object required"}), 400
+        if ingest_token and not _token_ok(ingest_token):
+            response = jsonify({"error": "unauthorized"})
+            response.status_code = 401
+            response.headers["WWW-Authenticate"] = 'Bearer realm="mushy"'
+            return response
 
-        raw_t = data.get("temperature", data.get("T"))
-        raw_rh = data.get("humidity", data.get("RH"))
         try:
-            temperature = float(raw_t)
-            humidity = float(raw_rh)
-        except (TypeError, ValueError):
-            return jsonify({"error": "temperature and humidity are required numbers"}), 400
-        if not (-40.0 <= temperature <= 80.0):
-            return jsonify({"error": "temperature outside -40..80 C"}), 400
-        if not (0.0 <= humidity <= 100.0):
-            return jsonify({"error": "humidity outside 0..100 %"}), 400
+            payload = validate_reading(request.get_json(silent=True), cfg.get("spatial", {}))
+        except ValidationError as exc:
+            return jsonify({"error": str(exc)}), 400
 
-        lux_raw = data.get("lux", data.get("L", -1.0))
-        try:
-            lux = float(lux_raw)
-        except (TypeError, ValueError):
-            lux = -1.0
-        if lux < 0:
-            lux = -1.0
+        node_id = payload["node_id"]
+        now = time.monotonic()
+        last = ingest_hits.get(node_id)
+        if rate_limit_seconds and last is not None and now - last < rate_limit_seconds:
+            retry_after = max(1, int(rate_limit_seconds - (now - last)))
+            response = jsonify(
+                {
+                    "error": f"rate limited: one sample per {rate_limit_seconds:g}s per node",
+                    "retry_after": retry_after,
+                }
+            )
+            response.status_code = 429
+            response.headers["Retry-After"] = str(retry_after)
+            return response
+        ingest_hits[node_id] = now
 
-        def _optional_float(key: str) -> float | None:
-            value = data.get(key)
-            if value is None or value == "":
-                return None
-            try:
-                return float(value)
-            except (TypeError, ValueError):
-                return None
-
-        x = _optional_float("x")
-        y = _optional_float("y")
-        try:
-            ts = int(data.get("ts") or time.time())
-        except (TypeError, ValueError):
-            ts = int(time.time())
-        node_id = str(data.get("node_id") or "remote")[:64]
+        temperature = payload["temperature"]
+        humidity = payload["humidity"]
+        lux = payload["lux"]
+        ts = payload["ts"]
 
         score, cls = compute_fgpi(temperature, humidity, lux)
         preds = predict_species(temperature, humidity, lux)
 
-        reading_id = db.insert_reading(ts, x, y, node_id, temperature, humidity, lux)
+        reading_id = db.insert_reading(
+            ts, payload["x"], payload["y"], node_id, temperature, humidity, lux
+        )
         fgpi_id = db.insert_fgpi(reading_id, ts, score, cls)
         db.insert_species_predictions(fgpi_id, preds)
+        try:
+            maybe_alert(
+                {
+                    "fgpi": score,
+                    "risk_class": cls,
+                    "temperature": temperature,
+                    "humidity": humidity,
+                    "node_id": node_id,
+                    "ts": ts,
+                },
+                cfg,
+            )
+        except Exception:  # alerting must never fail an ingest
+            log.exception("alert dispatch failed")
         return (
             jsonify(
                 {
@@ -459,11 +584,190 @@ def create_app(config_path: str | None = None) -> Flask:
             201,
         )
 
+    # ------------------------------------------------------------------ labels
+    def _same_origin() -> bool:
+        """True when the request came from the dashboard itself.
+
+        The label form runs in the operator's browser and must not carry the
+        ingest token in page source, so same-origin submissions are accepted
+        when `auth.allow_dashboard_labels` is on (default). Cross-origin posts
+        still need the bearer token.
+        """
+        origin = request.headers.get("Origin") or request.headers.get("Referer") or ""
+        if not origin:
+            return False
+        host = request.host
+        return origin.startswith(f"http://{host}") or origin.startswith(f"https://{host}")
+
+    @app.post("/api/labels")
+    def api_labels_create():
+        if ingest_token and not _token_ok(ingest_token):
+            allow_ui = bool(auth_cfg.get("allow_dashboard_labels", True)) and _same_origin()
+            if not allow_ui:
+                response = jsonify({"error": "unauthorized"})
+                response.status_code = 401
+                response.headers["WWW-Authenticate"] = 'Bearer realm="mushy"'
+                return response
+        raw = request.get_json(silent=True)
+        if raw is None:
+            raw = request.form.to_dict()
+        try:
+            label = validate_label(raw)
+        except ValidationError as exc:
+            return jsonify({"error": str(exc)}), 400
+        try:
+            label_id = db.insert_label(
+                int(time.time()),
+                label["reading_id"],
+                label["species"],
+                label["observed"],
+                label["confidence"],
+                label["note"],
+                label["operator"],
+                label["image_path"],
+            )
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        return jsonify({"ok": True, "id": label_id, **label}), 201
+
+    @app.get("/api/labels")
+    def api_labels_list():
+        since = request.args.get("since")
+        since_ts = _parse_day(since) if since else 0
+        rows = db.labels_with_readings(since_ts)
+        return jsonify({"count": len(rows), "labels": rows, **db.label_counts()})
+
+    @app.get("/api/labels/export.csv")
+    def api_labels_export():
+        since_ts = _parse_day(request.args.get("since")) if request.args.get("since") else 0
+        rows = db.labels_with_readings(since_ts)
+        columns = [
+            "id",
+            "ts",
+            "reading_id",
+            "species",
+            "observed",
+            "confidence",
+            "temperature",
+            "humidity",
+            "lux",
+            "x",
+            "y",
+            "node_id",
+            "operator",
+            "note",
+        ]
+        return _csv_response(
+            f"labels-{time.strftime('%Y%m%d')}.csv",
+            columns,
+            ({key: row.get(key) for key in columns} for row in rows),
+        )
+
+    # ------------------------------------------------------------------- nodes
+    @app.get("/api/nodes")
+    def api_nodes():
+        interval = int(float(cfg.get("sampling", {}).get("interval_seconds", 30)))
+        nodes = db.node_status(interval)
+        return jsonify(
+            {
+                "count": len(nodes),
+                "interval_seconds": interval,
+                "nodes": nodes,
+            }
+        )
+
+    @app.get("/partials/nodes")
+    def partial_nodes():
+        interval = int(float(cfg.get("sampling", {}).get("interval_seconds", 30)))
+        return render_template(
+            "partials/nodes.html",
+            nodes=db.node_status(interval),
+            interval_seconds=interval,
+        )
+
+    # ------------------------------------------------------------------ export
+    @app.get("/api/export.csv")
+    def api_export_csv():
+        table = str(request.args.get("table") or "readings").lower()
+        if table not in {"readings", "fgpi", "labels", "alerts"}:
+            return jsonify({"error": "table must be readings|fgpi|labels|alerts"}), 400
+        now = int(time.time())
+        from_ts = _parse_ts(request.args.get("from"), now - 7 * 86400)
+        to_ts = _parse_ts(request.args.get("to"), now)
+        if from_ts > to_ts:
+            return jsonify({"error": "`from` must be before `to`"}), 400
+        rows = list(db.export_rows(table, from_ts, to_ts))
+        columns = list(rows[0].keys()) if rows else ["ts"]
+        return _csv_response(
+            f"{table}-{time.strftime('%Y%m%d')}.csv",
+            columns,
+            ({key: row.get(key) for key in columns} for row in rows),
+        )
+
+    # -------------------------------------------------------------------- SSE
+    @app.get("/stream")
+    def stream():
+        """Optional SSE transport (config ui.transport: sse).
+
+        Emits the cards fragment whenever SQLite's data_version changes. Falls
+        back to polling when the operator leaves transport at `poll`.
+        """
+        if str(cfg.get("ui", {}).get("transport", "poll")).lower() != "sse":
+            abort(404)
+
+        def generate():
+            last_version = None
+            idle = 0.0
+            yield "retry: 3000\n\n"
+            while True:
+                try:
+                    with db.connection() as conn:
+                        version = conn.execute("PRAGMA data_version").fetchone()[0]
+                except Exception:
+                    version = None
+                if version is not None and version != last_version:
+                    last_version = version
+                    idle = 0.0
+                    html = render_template(
+                        "partials/cards.html", oob=True, **_template_context()
+                    )
+                    # SSE payloads are newline delimited; the fragment has no
+                    # <pre>, so collapsing newlines is safe.
+                    yield "data: " + html.replace("\n", " ") + "\n\n"
+                else:
+                    idle += 1.0
+                    if idle >= 15.0:
+                        idle = 0.0
+                        yield ": keepalive\n\n"
+                time.sleep(1.0)
+
+        response = Response(generate(), mimetype="text/event-stream")
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["X-Accel-Buffering"] = "no"
+        return response
+
     @app.errorhandler(404)
     def not_found(_error):
         if request.path.startswith("/api/"):
             return jsonify({"error": "not found"}), 404
         return render_template("dashboard.html", **_template_context()), 404
+
+    # ------------------------------------------------------------- alert loop
+    # Only runs when explicitly enabled; a daemon thread so `flask run` and
+    # the systemd unit both stop cleanly.
+    if (cfg.get("alerts") or {}).get("enabled"):
+        poll_seconds = max(5.0, float((cfg.get("alerts") or {}).get("poll_seconds", 30)))
+
+        def _alert_loop():
+            while True:
+                try:
+                    maybe_alert(db.latest_snapshot(), cfg)
+                except Exception:
+                    log.exception("alert poll failed")
+                time.sleep(poll_seconds)
+
+        threading.Thread(target=_alert_loop, name="fungi-alerts", daemon=True).start()
+        log.info("alerting enabled (poll every %.0fs)", poll_seconds)
 
     return app
 

@@ -1,0 +1,11 @@
+[Unit]
+Description=Weekly mushy database maintenance (Sunday 03:30)
+
+[Timer]
+OnCalendar=Sun *-*-* 03:30:00
+Persistent=true
+RandomizedDelaySec=600
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

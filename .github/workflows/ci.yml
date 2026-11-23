@@ -1,0 +1,107 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    env:
+      FUNGI_SIMULATE: "1"
+      MUSHY_INGEST_TOKEN: ci-token
+      MPLBACKEND: Agg
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Byte-compile every module
+        run: |
+          python -m compileall -q app scripts
+          python - <<'EOF'
+          import pathlib, py_compile, sys
+          bad = []
+          for path in pathlib.Path("app").rglob("*.py"):
+              try:
+                  py_compile.compile(str(path), doraise=True)
+              except py_compile.PyCompileError as exc:
+                  bad.append(f"{path}: {exc}")
+          if bad:
+              print("\n".join(bad))
+              sys.exit(1)
+          print("compiled", len(list(pathlib.Path('app').rglob('*.py'))), "modules")
+          EOF
+
+      - name: Unit + API tests
+        run: pytest tests -q --maxfail=1
+
+      - name: Static asset budget (<110 KB)
+        run: |
+          python - <<'EOF'
+          import pathlib, sys
+          assets = ["dashboard.css", "htmx.min.js", "uplot.min.js", "uplot.min.css"]
+          total = sum((pathlib.Path("static") / a).stat().st_size for a in assets)
+          print(f"{total} bytes across {len(assets)} vendor assets")
+          sys.exit(0 if total < 110_000 else 1)
+          EOF
+
+      - name: Acceptance harness
+        run: python scripts/verify.py -v
+
+      - name: Resource budget (advisory)
+        continue-on-error: true
+        run: python scripts/check_budget.py
+
+  guardrails:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Guardrail audit
+        run: |
+          python - <<'EOF'
+          import pathlib, re, sys
+
+          errors = []
+          vision = re.compile(r"^\s*(?:import|from)\s+(cv2|torch|tensorflow|tflite_runtime)\b", re.M)
+          remote = re.compile(r"<(?:script|link)[^>]+(?:https?:)?//", re.I)
+          detected = re.compile(r"\bdetected\b", re.I)
+
+          for path in sorted(pathlib.Path("app").rglob("*.py")):
+              if vision.search(path.read_text(encoding="utf-8")):
+                  errors.append(f"{path}: vision/ML framework import")
+          for path in sorted(pathlib.Path("app/templates").rglob("*.html")):
+              text = path.read_text(encoding="utf-8")
+              if remote.search(text):
+                  errors.append(f"{path}: remote asset reference")
+              if detected.search(text):
+                  errors.append(f"{path}: uses the word 'detected'")
+          if errors:
+              print("\n".join(errors))
+              sys.exit(1)
+          print("guardrails clean")
+          EOF

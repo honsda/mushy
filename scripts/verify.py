@@ -284,6 +284,97 @@ def check_dataset_calibration():
     return f"fixture {rows} rows, risk classes ordered"
 
 
+def check_auth():
+    """Writes need a bearer token once one is configured; reads stay open."""
+    import yaml
+
+    cfg = yaml.safe_load((ROOT / "config.yaml").read_text(encoding="utf-8")) or {}
+    cfg.setdefault("server", {}).setdefault("auth", {})["ingest_token"] = "verify-token"
+    with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False, encoding="utf-8") as fh:
+        yaml.safe_dump(cfg, fh)
+        cfg_path = fh.name
+    from app.server import create_app
+
+    client = create_app(cfg_path).test_client()
+    payload = {"temperature": 24.0, "humidity": 88.0, "node_id": "auth-check"}
+    assert client.post("/api/ingest", json=payload).status_code == 401, "accepted an unauthenticated write"
+    assert client.post("/api/ingest", json={**payload, "node_id": "auth-wrong"},
+                       headers={"Authorization": "Bearer nope"}).status_code == 401
+    assert client.post("/api/ingest", json={**payload, "node_id": "auth-ok"},
+                       headers={"Authorization": "Bearer verify-token"}).status_code == 201
+    limited = client.post("/api/ingest", json={**payload, "node_id": "auth-ok"},
+                          headers={"Authorization": "Bearer verify-token"})
+    assert limited.status_code == 429, f"rate limit not enforced: {limited.status_code}"
+    assert int(limited.headers.get("Retry-After", 0)) >= 1
+    assert client.get("/api/latest").status_code == 200, "reads must stay open on the LAN"
+    Path(cfg_path).unlink(missing_ok=True)
+    return "401 without token, 201 with, 429 on repeat"
+
+
+def check_labels():
+    import app.db as db
+
+    reading_id = int(db.latest_snapshot()["reading_id"])
+    created = client().post(
+        "/api/labels",
+        json={
+            "reading_id": reading_id,
+            "species": "Aspergillus versicolor",
+            "observed": True,
+            "confidence": 4,
+            "note": "verify",
+        },
+    )
+    assert created.status_code == 201, created.get_data(as_text=True)[:200]
+    listing = client().get("/api/labels").get_json()
+    assert listing["count"] >= 1, listing
+    export = client().get("/api/labels/export.csv")
+    assert export.status_code == 200
+    text = export.get_data(as_text=True)
+    assert text.startswith("id,ts,reading_id,species,observed"), text[:80]
+    return f"{listing['count']} label(s), CSV export ok"
+
+
+def check_nodes_and_export():
+    nodes = client().get("/api/nodes").get_json()
+    assert nodes["count"] >= 1, nodes
+    row = nodes["nodes"][0]
+    assert row["status"] in {"green", "amber", "red"}, row
+    now = int(time.time())
+    export = client().get(f"/api/export.csv?table=readings&from={now - 3600}&to={now + 60}")
+    assert export.status_code == 200, export.status_code
+    body = export.get_data(as_text=True)
+    assert body.startswith("id,ts,x,y,node_id"), body[:80]
+    assert len(body.splitlines()) >= 2, "export has no rows"
+    assert client().get("/api/export.csv?table=sqlite_master").status_code == 400
+    return f"{nodes['count']} nodes, {len(body.splitlines()) - 1} CSV rows"
+
+
+def check_confidence():
+    species = client().get("/api/latest").get_json()["species"]
+    assert species, "no species predictions"
+    allowed = {"low", "medium", "high"}
+    for entry in species:
+        assert entry.get("confidence") in allowed, entry
+    return f"{len(species)} predictions tagged ({species[0]['confidence']})"
+
+
+def check_regional_overlay():
+    import app.models.species as model
+
+    assert model.region() == "east_java", model.region()
+    names = {curve["name"] for curve in model._load_curves()}
+    assert "Aspergillus flavus" in names, "overlay not merged"
+    flavus = next(c for c in model._load_curves() if c["name"] == "Aspergillus flavus")
+    assert flavus["T_opt"] == 30.0, flavus
+    return f"east_java overlay active ({len(names)} species)"
+
+
+def check_sse_off_by_default():
+    assert client().get("/stream").status_code == 404, "SSE served while ui.transport=poll"
+    return "poll transport (SSE opt-in)"
+
+
 CHECKS = (
     ("schema", check_schema),
     ("sampler", check_sampler),
@@ -299,6 +390,12 @@ CHECKS = (
     ("parametric fallback", check_parametric),
     ("dataset calibration", check_dataset_calibration),
     ("guardrails", check_guardrails),
+    ("api auth", check_auth),
+    ("labels", check_labels),
+    ("nodes + CSV export", check_nodes_and_export),
+    ("confidence", check_confidence),
+    ("regional overlay", check_regional_overlay),
+    ("transport", check_sse_off_by_default),
 )
 
 

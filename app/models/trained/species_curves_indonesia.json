@@ -1,0 +1,80 @@
+{
+  "_comment": [
+    "East Java regional overlay. Loaded after species_curves.json and merged",
+    "per species, so only the parameters a tropical-Indonesian study actually",
+    "pins down need to appear here. Set species.region: east_java in",
+    "config.yaml to activate; the global table stays the default.",
+    "",
+    "Sources (published, non-AI):",
+    "  * Aspergillus flavus - Indonesian strain growth optima near 30 C with",
+    "    growth at 90 %RH; aflatoxin risk rises above 28 C. Reported in",
+    "    Indonesian aflatoxin/Aspergillus literature (Bogor/IPB strain work).",
+    "  * Fusarium oxysporum - Javanese isolate, optimum near 25 C, disease",
+    "    expression at 28 C, high humidity requirement (>80 %RH).",
+    "  * Eurotium herbariorum / A. versicolor - tropical indoor isolates",
+    "    favour 27-30 C; both remain the dominant indoor species in humid",
+    "    tropical buildings (GBIF occurrence check: scripts/fetch_regional_data.py).",
+    "",
+    "These are cardinal-range anchors for ranking, not occurrence",
+    "probabilities. Retrain with local labels before acting on them."
+  ],
+  "region": "east_java",
+  "species": {
+    "Aspergillus flavus": {
+      "T_min": 12.0,
+      "T_opt": 30.0,
+      "T_max": 42.0,
+      "RH_min": 75.0,
+      "RH_opt": 90.0,
+      "lux_pref": {"min": 0.0, "opt": 50.0, "max": 1200.0},
+      "source": "Indonesian A. flavus strain: max growth near 30 C, 90 %RH",
+      "region": "east_java"
+    },
+    "Fusarium oxysporum": {
+      "T_min": 10.0,
+      "T_opt": 25.0,
+      "T_max": 35.0,
+      "RH_min": 80.0,
+      "RH_opt": 90.0,
+      "lux_pref": {"min": 0.0, "opt": 100.0, "max": 2000.0},
+      "source": "Javanese F. oxysporum isolate: optimum 25 C, disease-opt 28 C",
+      "region": "east_java"
+    },
+    "Aspergillus versicolor": {
+      "T_min": 6.0,
+      "T_opt": 27.0,
+      "T_max": 37.0,
+      "RH_min": 70.0,
+      "RH_opt": 88.0,
+      "source": "Tropical indoor isolates favour 27 C; humid-building dominant",
+      "region": "east_java"
+    },
+    "Eurotium herbariorum": {
+      "T_min": 6.0,
+      "T_opt": 29.0,
+      "T_max": 38.0,
+      "RH_min": 72.0,
+      "RH_opt": 88.0,
+      "source": "Tropical indoor xerophile; optimum near 29 C",
+      "region": "east_java"
+    },
+    "Stachybotrys chartarum": {
+      "T_min": 8.0,
+      "T_opt": 25.0,
+      "T_max": 35.0,
+      "RH_min": 92.0,
+      "RH_opt": 98.0,
+      "source": "Tropical wall-growth isolates need near-saturation RH",
+      "region": "east_java"
+    },
+    "Aspergillus niger": {
+      "T_min": 8.0,
+      "T_opt": 34.0,
+      "T_max": 48.0,
+      "RH_min": 72.0,
+      "RH_opt": 90.0,
+      "source": "Tropical A. niger complex; high temperature optimum",
+      "region": "east_java"
+    }
+  }
+}

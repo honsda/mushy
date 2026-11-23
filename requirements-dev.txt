@@ -1,0 +1,4 @@
+-r requirements.txt
+
+# Dev/CI only (not needed on the Pi at runtime).
+pytest>=8.0

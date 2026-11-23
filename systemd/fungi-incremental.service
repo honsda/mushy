@@ -1,0 +1,19 @@
+[Unit]
+Description=mushy nightly incremental model update (SGD adapter)
+Documentation=file:///home/pi/fungi-forecast/docs/retraining.md
+After=network-online.target fungi-server.service
+
+[Service]
+Type=oneshot
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/fungi-forecast
+Environment=PYTHONUNBUFFERED=1
+Environment=FUNGI_CONFIG=/home/pi/fungi-forecast/config.yaml
+ExecStart=/home/pi/fungi-forecast/.venv/bin/python scripts/incremental_update.py
+Nice=10
+IOSchedulingClass=idle
+# A run that overruns the next sample interval would fight the sampler for I/O.
+TimeoutStartSec=900
+NoNewPrivileges=true
+PrivateTmp=true

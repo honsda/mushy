@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the mushy incremental model update nightly at 02:00
+
+[Timer]
+OnCalendar=*-*-* 02:00:00
+Persistent=true
+RandomizedDelaySec=300
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

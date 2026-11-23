@@ -4,6 +4,10 @@ sensors:
   i2c_bus: 1
   # Bench/CI only. Set true (or FUNGI_SIMULATE=1) when no hardware is attached.
   simulate: false
+  # Calibration offsets applied to every sample (see docs/calibration.md).
+  temp_offset: 0.0       # +0.4 if the DHT22 reads 0.4 C low
+  humidity_offset: 0.0   # -2.0 if it reads 2 %RH high
+  lux_scale: 1.0         # BH1750 glass-window correction factor
 sampling:
   interval_seconds: 30
 spatial:
@@ -16,8 +20,41 @@ spatial:
 server:
   host: 0.0.0.0
   port: 5000
+  auth:
+    # Empty = open on a trusted LAN (the default deployment). Set a token, or
+    # export MUSHY_INGEST_TOKEN, to require `Authorization: Bearer <token>` on
+    # writes. MUSHY_READ_TOKEN overrides read_token.
+    ingest_token: ""
+    read_token: ""
+    auth_reads: false            # true = token needed for /api/* and /partials/*
+    ingest_rate_limit_seconds: 5 # one sample per node per window
+    allow_dashboard_labels: true # same-origin browser may POST labels
 species:
   mode: auto             # auto = ml if model exists else parametric
+  region: east_java      # default | east_java (regional curve overlay)
+  model_path: ""         # blank = auto (species_rf_east_java.joblib when east_java)
   top_k: 5
+  blend_sgd_weight: 0.3  # SGD adapter share when one exists
+  min_new_labels: 20     # nightly adapter needs this many unseen labels
+  sgd:
+    enabled: true
+    min_free_mb: 300
+    max_soc_temp_c: 70
+alerts:
+  enabled: false
+  backends: [webhook]    # webhook | smtp
+  webhook_url: ""
+  debounce_minutes: 15
+  poll_seconds: 30
+  smtp:
+    host: ""
+    port: 587
+    user: ""
+    password: ""
+    to: []
+    starttls: true
+ui:
+  transport: poll        # poll | sse
 database:
   path: fungi.db         # relative to the project root; override with FUNGI_DB
+  prune_days: 90

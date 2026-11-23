@@ -1,0 +1,20 @@
+[Unit]
+Description=mushy weekly database prune + backup
+Documentation=file:///home/pi/fungi-forecast/README.md
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/fungi-forecast
+Environment=PYTHONUNBUFFERED=1
+Environment=FUNGI_CONFIG=/home/pi/fungi-forecast/config.yaml
+# prune-days mirrors database.prune_days in config.yaml
+ExecStart=/home/pi/fungi-forecast/.venv/bin/python scripts/db_maintenance.py \
+  --prune-days 90 --backup /home/pi/backups --vacuum
+Nice=19
+IOSchedulingClass=idle
+TimeoutStartSec=1800
+NoNewPrivileges=true
+PrivateTmp=true
