@@ -217,7 +217,9 @@ def create_app(config_path: str | None = None) -> Flask:
 
     @app.get("/partials/cards")
     def partial_cards():
-        return render_template("partials/cards.html", **_template_context())
+        # oob=True adds the header timestamp as an out-of-band swap. The
+        # initial server-rendered include must not emit a second #updated.
+        return render_template("partials/cards.html", oob=True, **_template_context())
 
     @app.get("/partials/species")
     def partial_species():
@@ -269,7 +271,15 @@ def create_app(config_path: str | None = None) -> Flask:
 
     @app.get("/heatmap.png")
     def heatmap_png():
-        path = _ensure_heatmap()
+        try:
+            path = _ensure_heatmap()
+        except Exception:
+            # A map failure must not take the dashboard down; serve the last
+            # good PNG if we have one, otherwise a clear 503.
+            log.exception("heatmap generation failed")
+            if not heatmap_path.exists():
+                abort(503)
+            path = heatmap_path
         response = send_file(path, mimetype="image/png", conditional=True)
         response.headers["Cache-Control"] = "no-store, max-age=0"
         return response
