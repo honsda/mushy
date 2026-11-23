@@ -7,7 +7,7 @@ training, BT PAN. Load only the section you need.
 ## Token discipline (keeps quality, cuts cost)
 
 1. **Verify, don't narrate.** `python scripts/verify.py` is the whole §15 gate
-   (11 checks, ~10 s). Paste its output instead of hand-running curls.
+   (14 checks, ~15 s). Paste its output instead of hand-running curls.
 2. **Grep before you read.** `rg -n "pattern" app/` beats opening whole files.
    Only read a file when you are about to edit it, and read the region you edit.
 3. **One edit call per file.** Batch all changes to a file into a single `edit`
@@ -28,7 +28,8 @@ training, BT PAN. Load only the section you need.
 | FGPI formula | `app/models/fgpi.py` |
 | Species ML/parametric | `app/models/species.py`, `app/models/trained/species_curves.json` |
 | IDW/cubic grid | `app/spatial/interpolate.py` |
-| Matplotlib PNG | `app/spatial/heatmap.py` |
+| Matplotlib PNG | `app/spatial/heatmap.py` (renders any layer) |
+| Map layer specs (units, ramps, domains) | `app/spatial/layers.py` |
 | Sensors (simulate flag) | `app/sensors/dht22.py`, `app/sensors/light.py` |
 | Dashboard + HTMX partials | `app/templates/` |
 | Vendored JS/CSS | `static/` (precompiled, no build on Pi) |
@@ -37,7 +38,8 @@ training, BT PAN. Load only the section you need.
 ## Commands
 
 ```bash
-python scripts/verify.py -v          # full acceptance gate
+python scripts/verify.py -v          # full acceptance gate (14 checks)
+python scripts/dataset_check.py      # FGPI vs ASHRAE/Hukka-Viitanen reference
 FUNGI_SIMULATE=1 python scripts/sample_loop.py --once
 FUNGI_SIMULATE=1 python -m flask --app app.server:create_app run   # dev server
 python scripts/train_species.py      # offline, dev machine only
@@ -50,8 +52,10 @@ python scripts/train_species.py      # offline, dev machine only
 - Copy says "predicted suitability", never "detected".
 - Frontend budget: <100 KB transferred (currently ~46.6 KB gzipped + heatmap).
 - Sensors fail open: `read_lux()` returns `-1.0`; sampler logs and skips.
-- Partials poll independently (5 s cards / 10 s species / 30 s heatmap); never
-  reload the whole document.
+- Partials poll independently (5 s cards / 10 s species / 30 s map); never
+  reload the whole document. The map layer travels in the poll URL, because
+  htmx inherits `hx-vals` from ancestors and would clobber the dropdown.
+- Adding a map layer = one entry in `app/spatial/layers.py`; nothing else changes.
 
 ## Not automatable — a human on the Pi must check
 

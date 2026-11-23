@@ -16,8 +16,9 @@ import app.db as db
 from app import STATIC_DIR, TEMPLATE_DIR, load_config
 from app.models.fgpi import compute_fgpi
 from app.models.species import backend_name, predict_species
-from app.spatial.heatmap import render_png
-from app.spatial.interpolate import grid_data
+from app.spatial.heatmap import render_layer_png
+from app.spatial.interpolate import grid_data, grid_values
+from app.spatial.layers import DEFAULT_LAYER, LAYERS, get_layer, layer_keys
 
 log = logging.getLogger("fungi.server")
 
@@ -36,6 +37,22 @@ RISK_TEXT = {
 
 # pi-btnap's usual PAN subnet. Overridable for unusual deployments.
 BT_PREFIXES = ("10.10.10.",)
+
+
+# Species names are abbreviated on the map so labels stay inside the plot area.
+# "Aspergillus versicolor" -> "A. versicolor"; group/family suffixes are dropped.
+def _short_species(name: str) -> str:
+    """Compact a binomial for map labels; never changes its meaning."""
+    cleaned = " ".join(str(name or "").split())
+    cleaned = cleaned.replace(" spp.", " spp").replace(" group", "")
+    if not cleaned:
+        return "n/a"
+    parts = cleaned.split(" ")
+    if len(parts) >= 2 and parts[1].lower() in {"spp", "sp.", "sp"}:
+        return f"{parts[0][:1]}. {parts[1].rstrip(".")}"
+    if len(parts) >= 2 and len(parts[0]) > 3:
+        return f"{parts[0][0]}. {' '.join(parts[1:])}"
+    return cleaned
 
 
 def _connection_label(remote_addr: str | None) -> str:
@@ -64,6 +81,9 @@ def create_app(config_path: str | None = None) -> Flask:
     heatmap_lock = threading.Lock()
     heatmap_path = STATIC_DIR / "heatmap.png"
     heatmap_state = {"source_id": -1}
+    # One PNG per layer, refreshed lazily; key is the layer name.
+    layer_paths = {key: STATIC_DIR / f"map-{key}.png" for key in layer_keys()}
+    layer_state: dict[str, int] = {key: -1 for key in layer_keys()}
 
     @app.after_request
     def _compress_dynamic(response):
@@ -132,61 +152,118 @@ def create_app(config_path: str | None = None) -> Flask:
             },
         }
 
-    def _ensure_heatmap() -> Path:
-        """Render only when the newest FGPI point is newer than the PNG."""
+    def _site_annotations() -> list[dict]:
+        """Label each measured site with node id, FGPI and predicted species.
+
+        Only real samples are labelled; interpolated cells stay unannotated so
+        the map never implies a species identification between sensors.
+        """
+        sites: list[dict] = []
+        for row in db.sample_locations(int(float(cfg["spatial"].get("window_hours", 6)) * 3600)):
+            species = _short_species(str(row.get("species") or ""))
+            fgpi = float(row.get("fgpi") or 0.0)
+            node = str(row.get("node_id") or "node")[:12]
+            label = f"{node}\nFGPI {fgpi:.0f} {row.get('risk_class') or ''}\n{species}"
+            sites.append({"x": row["x"], "y": row["y"], "label": label})
+        return sites
+
+    def _map_points(field: str, window: int) -> list[tuple[float, float, float]]:
+        points = db.spatial_points(window, field=field)
+        if points:
+            return points
+        # A fixed node with no coordinates still deserves a flat field.
         spatial = cfg.get("spatial", {})
+        snap = db.latest_reading_values()
+        fixed = spatial.get("fixed_node_position") or [
+            float(spatial.get("x_max", 10.0)) / 2.0,
+            float(spatial.get("y_max", 8.0)) / 2.0,
+        ]
+        if not snap:
+            return []
+        x = float(snap["x"]) if snap.get("x") is not None else float(fixed[0])
+        y = float(snap["y"]) if snap.get("y") is not None else float(fixed[1])
+        if field == "fgpi":
+            latest = db.latest_snapshot()
+            value = float(latest["fgpi"]) if latest else 0.0
+        elif field == "lux":
+            value = float(snap.get("lux") or 0.0)
+            if value < 0:
+                return []
+        else:
+            value = float(snap.get(field) or 0.0)
+        return [(x, y, value)]
+
+    def _ensure_heatmap(layer: str = DEFAULT_LAYER) -> Path:
+        """Render a layer only when the newest FGPI row is newer than its PNG."""
+        spec = get_layer(layer)
+        spatial = cfg.get("spatial", {})
+        out_path = layer_paths[spec.key]
         with heatmap_lock:
             latest_ts = db.latest_fgpi_ts()
             latest_id = db.latest_fgpi_id()
             try:
-                fresh = heatmap_path.exists() and heatmap_path.stat().st_mtime >= latest_ts
+                fresh = out_path.exists() and out_path.stat().st_mtime >= latest_ts
             except OSError:
                 fresh = False
-            if fresh and heatmap_state["source_id"] == latest_id:
-                return heatmap_path
+            if fresh and layer_state.get(spec.key) == latest_id:
+                return out_path
 
             window = int(float(spatial.get("window_hours", 6)) * 3600)
-            points = db.spatial_points(window)
+            resolution = int(spatial.get("resolution", 100))
+            x_max = float(spatial.get("x_max", 10.0))
+            y_max = float(spatial.get("y_max", 8.0))
+            points = _map_points(spec.key, window)
             if not points:
-                snap = db.latest_snapshot()
-                fixed = spatial.get("fixed_node_position") or [
-                    float(spatial.get("x_max", 10.0)) / 2.0,
-                    float(spatial.get("y_max", 8.0)) / 2.0,
-                ]
-                points = [
-                    (
-                        float(snap["x"]) if snap and snap.get("x") is not None else float(fixed[0]),
-                        float(snap["y"]) if snap and snap.get("y") is not None else float(fixed[1]),
-                        float(snap["fgpi"]) if snap else 0.0,
-                    )
-                ]
-            grid = grid_data(
-                points,
-                float(spatial.get("x_max", 10.0)),
-                float(spatial.get("y_max", 8.0)),
-                int(spatial.get("resolution", 100)),
-            )
-            started = time.perf_counter()
-            render_png(grid, str(heatmap_path))
-            heatmap_state["source_id"] = latest_id
-            log.info("heatmap rendered in %.2fs (%d points)", time.perf_counter() - started, len(points))
-            return heatmap_path
+                return out_path
 
-    def _heatmap_token() -> int:
+            if spec.key == "fgpi":
+                grid = grid_data(points, x_max, y_max, resolution)
+            else:
+                raw = grid_values(points, x_max, y_max, resolution)
+                grid = spec.transform(raw)
+
+            started = time.perf_counter()
+            sites = _site_annotations()
+            render_layer_png(
+                grid,
+                str(out_path),
+                layer=spec,
+                sites=sites,
+                x_max=x_max,
+                y_max=y_max,
+            )
+            layer_state[spec.key] = latest_id
+            log.info(
+                "%s map rendered in %.2fs (%d points, %d sites)",
+                spec.key,
+                time.perf_counter() - started,
+                len(points),
+                len(sites),
+            )
+            return out_path
+
+    def _heatmap_token(layer: str = DEFAULT_LAYER) -> int:
         try:
-            return int(heatmap_path.stat().st_mtime)
+            return int(layer_paths[get_layer(layer).key].stat().st_mtime)
         except OSError:
             return int(time.time())
 
+    def _selected_layer() -> str:
+        return get_layer(request.args.get("layer") or request.args.get("map")).key
+
     def _template_context() -> dict:
         snap = _snapshot()
+        active = _selected_layer()
         return {
             "latest": snap,
             "cfg": cfg,
             "connection": _connection_label(request.remote_addr),
             "backend": backend_name(),
             "updated": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(snap.get("ts") or time.time())),
-            "heatmap_token": _heatmap_token(),
+            "heatmap_token": _heatmap_token(active),
+            "active_layer": active,
+            "layer": LAYERS[active],
+            "layers": [LAYERS[k] for k in layer_keys()],
         }
 
     # ------------------------------------------------------------- static files
@@ -227,10 +304,14 @@ def create_app(config_path: str | None = None) -> Flask:
 
     @app.get("/partials/heatmap")
     def partial_heatmap():
+        active = _selected_layer()
         return render_template(
             "partials/heatmap.html",
-            heatmap_token=_heatmap_token(),
+            heatmap_token=_heatmap_token(active),
             cfg=cfg,
+            active_layer=active,
+            layer=LAYERS[active],
+            layers=[LAYERS[k] for k in layer_keys()],
         )
 
     # --------------------------------------------------------------------- API
@@ -271,18 +352,48 @@ def create_app(config_path: str | None = None) -> Flask:
 
     @app.get("/heatmap.png")
     def heatmap_png():
+        """FGPI map. Kept for the spec URL and for older bookmarks."""
+        return _map_response(DEFAULT_LAYER)
+
+    @app.get("/maps/<layer>.png")
+    def map_png(layer: str):
+        spec = LAYERS.get(layer.lower())
+        if spec is None:
+            abort(404)
+        return _map_response(spec.key)
+
+    def _map_response(layer: str):
+        path = layer_paths[get_layer(layer).key]
         try:
-            path = _ensure_heatmap()
+            path = _ensure_heatmap(layer)
         except Exception:
             # A map failure must not take the dashboard down; serve the last
             # good PNG if we have one, otherwise a clear 503.
-            log.exception("heatmap generation failed")
-            if not heatmap_path.exists():
+            log.exception("%s map generation failed", layer)
+            if not path.exists():
                 abort(503)
-            path = heatmap_path
         response = send_file(path, mimetype="image/png", conditional=True)
         response.headers["Cache-Control"] = "no-store, max-age=0"
         return response
+
+    @app.get("/api/maps")
+    def api_maps():
+        """Layer metadata for the dropdown and for API consumers."""
+        return jsonify(
+            {
+                "default": DEFAULT_LAYER,
+                "layers": [
+                    {
+                        "key": spec.key,
+                        "label": spec.label,
+                        "unit": spec.unit,
+                        "url": f"/maps/{spec.key}.png",
+                        "log_axis": spec.log_axis,
+                    }
+                    for spec in (LAYERS[k] for k in layer_keys())
+                ],
+            }
+        )
 
     @app.post("/api/ingest")
     def api_ingest():

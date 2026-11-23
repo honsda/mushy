@@ -162,21 +162,74 @@ def species_for_fgpi(fgpi_id: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def spatial_points(seconds: int = 21600) -> list[tuple[float, float, float]]:
-    """(x, y, fgpi) points for interpolation; fixed nodes use configured x/y."""
+def spatial_points(seconds: int = 21600, field: str = "fgpi") -> list[tuple[float, float, float]]:
+    """(x, y, value) points for interpolation; fixed nodes use configured x/y.
+
+    field is whitelisted to a column of the joined view so the layer dropdown
+    cannot become arbitrary SQL.
+    """
+    column = {
+        "fgpi": "f.fgpi",
+        "temperature": "r.temperature",
+        "humidity": "r.humidity",
+        "lux": "r.lux",
+    }.get(field, "f.fgpi")
     cutoff = int(time.time()) - int(seconds)
     with connection() as conn:
         rows = conn.execute(
-            """
-            SELECT r.x, r.y, f.fgpi
+            f"""
+            SELECT r.x, r.y, {column} AS value
             FROM readings r
             JOIN fgpi f ON f.reading_id = r.id
             WHERE f.ts >= ? AND r.x IS NOT NULL AND r.y IS NOT NULL
+              AND {column} IS NOT NULL
             ORDER BY f.ts ASC
             """,
             (cutoff,),
         ).fetchall()
-    return [(float(r["x"]), float(r["y"]), float(r["fgpi"])) for r in rows]
+    points: list[tuple[float, float, float]] = []
+    for row in rows:
+        value = float(row["value"])
+        # read_lux() reports -1.0 when the sensor is missing; treat as absent.
+        if field == "lux" and value < 0:
+            continue
+        points.append((float(row["x"]), float(row["y"]), value))
+    return points
+
+
+def latest_reading_values() -> dict[str, float | None] | None:
+    """Newest reading's raw sensor columns, for single-point map fallbacks."""
+    with connection() as conn:
+        row = conn.execute(
+            "SELECT x, y, temperature, humidity, lux FROM readings"
+            " ORDER BY ts DESC, id DESC LIMIT 1"
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def sample_locations(seconds: int = 21600) -> list[dict]:
+    """Distinct sensor sites with their newest FGPI, risk and top species."""
+    cutoff = int(time.time()) - int(seconds)
+    with connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT r.x, r.y, r.node_id, f.fgpi, f.risk_class, s.species
+            FROM fgpi f
+            JOIN readings r ON r.id = f.reading_id
+            LEFT JOIN species_predictions s ON s.fgpi_id = f.id AND s.rank = 1
+            WHERE f.ts >= ?
+              AND r.x IS NOT NULL AND r.y IS NOT NULL
+              AND f.id = (
+                SELECT f2.id FROM fgpi f2 JOIN readings r2 ON r2.id = f2.reading_id
+                WHERE r2.x = r.x AND r2.y = r.y
+                ORDER BY f2.ts DESC, f2.id DESC LIMIT 1
+              )
+            ORDER BY f.ts DESC
+            LIMIT 32
+            """,
+            (cutoff,),
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def latest_fgpi_ts() -> int:

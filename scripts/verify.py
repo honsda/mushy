@@ -166,11 +166,20 @@ def check_ingest():
 def check_assets():
     raw = sum((ROOT / a).stat().st_size for a in ASSETS)
     gz = sum(len(gzip.compress((ROOT / a).read_bytes(), 9)) for a in ASSETS)
-    png = ROOT / "static" / "heatmap.png"
-    transferred = gz + (png.stat().st_size if png.exists() else 0)
+    # The dashboard shows one map at a time, so the worst case is the largest
+    # rendered layer, not the sum of all four.
+    maps = [
+        p for p in (ROOT / "static").glob("map-*.png")
+    ] + [ROOT / "static" / "heatmap.png"]
+    present = [p.stat().st_size for p in maps if p.exists()]
+    biggest_map = max(present) if present else 0
+    transferred = gz + biggest_map
     assert raw <= 100_000, f"vendor assets {raw} B > 100 KB on disk"
     assert transferred <= 100_000, f"{transferred} B transferred > 100 KB"
-    return f"{raw / 1000:.1f} KB on disk, {transferred / 1000:.1f} KB transferred"
+    return (
+        f"{raw / 1000:.1f} KB on disk, {transferred / 1000:.1f} KB transferred "
+        f"(incl. {biggest_map / 1000:.1f} KB map)"
+    )
 
 
 def check_parametric():
@@ -227,6 +236,54 @@ def check_guardrails():
     return "no camera/SPA/CDN, no 'detected' copy"
 
 
+def check_maps():
+    keys = ("fgpi", "temperature", "humidity", "lux")
+    sizes = {}
+    for key in keys:
+        started = time.perf_counter()
+        resp = client().get(f"/maps/{key}.png")
+        elapsed = time.perf_counter() - started
+        assert resp.status_code == 200, f"/maps/{key}.png -> {resp.status_code}"
+        png = resp.get_data()
+        assert png.startswith(b"\x89PNG\r\n\x1a\n"), f"{key}: not a PNG"
+        assert elapsed <= 3.0, f"{key}: {elapsed:.2f}s > 3s budget"
+        sizes[key] = len(png)
+    # Unknown layers must 404, not render the default.
+    assert client().get("/maps/nope.png").status_code == 404, "unknown layer did not 404"
+    meta = client().get("/api/maps").get_json()
+    assert [item["key"] for item in meta["layers"]] == list(keys), meta
+    assert meta["default"] == "fgpi", meta["default"]
+    largest = max(sizes.values())
+    return f"{len(sizes)} layers, largest {largest / 1000:.0f} KB"
+
+
+def check_layer_partial():
+    for layer in ("fgpi", "temperature", "humidity", "lux"):
+        html = client().get(f"/partials/heatmap?layer={layer}").get_data(as_text=True)
+        assert f"/maps/{layer}.png" in html, f"layer {layer} not in img src"
+        assert f'<option value="{layer}" selected' in html, f"layer {layer} not selected"
+        assert "name=\"layer\"" in html, "dropdown missing"
+    return "dropdown drives all 4 layers"
+
+
+def check_dataset_calibration():
+    """Offline sanity check: risk classes must order with reference growth."""
+    fixture = ROOT / "scripts" / "fixtures" / "mould_index_sample.csv"
+    assert fixture.exists(), "run: python scripts/dataset_check.py --write-fixture"
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "dataset_check.py"), "--csv", str(fixture)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert proc.returncode == 0, (proc.stderr or proc.stdout).strip()[-500:]
+    report = json.loads(proc.stdout[: proc.stdout.rfind("}") + 1])
+    rows = report["results"][0]["rows"]
+    assert rows >= 5, f"fixture has {rows} usable rows"
+    return f"fixture {rows} rows, risk classes ordered"
+
+
 CHECKS = (
     ("schema", check_schema),
     ("sampler", check_sampler),
@@ -234,10 +291,13 @@ CHECKS = (
     ("api/series", check_api_series),
     ("dashboard", check_dashboard),
     ("partials", check_partials),
+    ("maps: 4 layers <=3s", check_maps),
+    ("map dropdown", check_layer_partial),
     ("heatmap.png <=3s", check_heatmap),
     ("api/ingest", check_ingest),
     ("static budget", check_assets),
     ("parametric fallback", check_parametric),
+    ("dataset calibration", check_dataset_calibration),
     ("guardrails", check_guardrails),
 )
 

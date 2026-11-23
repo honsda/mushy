@@ -10,3 +10,4 @@ fungi.db-wal
 fungi.db-shm
 *.log
 .DS_Store
+fungi.db.bak

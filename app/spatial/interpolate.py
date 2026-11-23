@@ -69,6 +69,44 @@ def grid_data(
     resolution: int = 100,
 ) -> np.ndarray:
     """Interpolate (x, y, value) samples over [0, x_max] x [0, y_max]."""
+    return _grid(
+        points,
+        x_max,
+        y_max,
+        resolution,
+        lo=0.0,
+        hi=100.0,
+        prefer_cubic=str(load_config().get("spatial", {}).get("method", "idw")).lower()
+        == "cubic",
+    )
+
+
+def grid_values(
+    points: list[tuple[float, float, float]],
+    x_max: float,
+    y_max: float,
+    resolution: int = 100,
+    lo: float | None = None,
+    hi: float | None = None,
+) -> np.ndarray:
+    """Same interpolation for a generic quantity, not clamped to 0-100.
+
+    Used for temperature/humidity/lux maps, which have their own domains.
+    Cubic is the better-looking option for unbounded fields when scipy exists,
+    but a sparse sensor set overshoots badly, so IDW is the default there.
+    """
+    return _grid(points, x_max, y_max, resolution, lo=lo, hi=hi, prefer_cubic=False)
+
+
+def _grid(
+    points: list[tuple[float, float, float]],
+    x_max: float,
+    y_max: float,
+    resolution: int,
+    lo: float | None,
+    hi: float | None,
+    prefer_cubic: bool,
+) -> np.ndarray:
     resolution = max(2, int(resolution))
     x_max = max(float(x_max), 1e-6)
     y_max = max(float(y_max), 1e-6)
@@ -99,9 +137,12 @@ def grid_data(
     if px.size == 1:
         return np.full((resolution, resolution), float(pv[0]), dtype=float)
 
-    method = str(load_config().get("spatial", {}).get("method", "idw")).lower()
+    method = "cubic" if prefer_cubic else "idw"
     grid = _cubic(px, py, pv, xs, ys) if method == "cubic" else None
     if grid is None:
         grid = _idw(px, py, pv, xs, ys)
 
-    return np.clip(np.asarray(grid, dtype=float), 0.0, 100.0)
+    grid = np.asarray(grid, dtype=float)
+    if lo is not None and hi is not None:
+        grid = np.clip(grid, float(lo), float(hi))
+    return grid

@@ -29,6 +29,7 @@ project spec) — clone it there, or edit the unit paths.
 - [Dashboard](#dashboard)
 - [Models](#models)
 - [Training the RandomForest](#training-the-randomforest)
+- [Dataset check](#dataset-check-fgpi-calibration)
 - [Bluetooth PAN](#bluetooth-pan)
 - [Verification](#verification-against-the-acceptance-criteria)
 - [Limitations](#limitations)
@@ -99,8 +100,9 @@ mushy/                         # deployed as fungi-forecast/
 │   │   └── trained/
 │   │       └── species_curves.json
 │   ├── spatial/
-│   │   ├── interpolate.py     # grid_data()
-│   │   └── heatmap.py         # render_png()
+│   │   ├── interpolate.py     # grid_data() + grid_values()
+│   │   ├── layers.py          # map layer specs (units, ramps, domains)
+│   │   └── heatmap.py         # render_png() / render_layer_png()
 │   ├── db.py                  # SQLite schema + helpers
 │   └── templates/
 │       ├── dashboard.html
@@ -113,13 +115,18 @@ mushy/                         # deployed as fungi-forecast/
 │   ├── htmx.min.js            # 1.9.12 (48.1 KB)
 │   ├── uplot.min.js           # 1.6.24 (46.0 KB)
 │   ├── uplot.min.css          # 1.9 KB
-│   ├── heatmap.png            # generated; placeholder shipped
+│   ├── heatmap.png            # generated FGPI map (spec URL)
+│   ├── map-<layer>.png        # generated per-layer maps (fgpi/temperature/humidity/lux)
 │   └── *.gz                   # precompressed siblings served by Flask
 ├── scripts/
 │   ├── build_tailwind.sh      # dev machine only
 │   ├── train_species.py       # offline training
+│   ├── dataset_check.py       # FGPI vs published mould-index dataset
+│   ├── verify.py              # one-command §15 acceptance gate
 │   ├── sample_loop.py         # 30 s sampling daemon
 │   └── init_db.py
+├── docs/SPEC.md               # original brief, verbatim
+├── AGENTS.md                  # working agreement for coding sessions
 ├── systemd/
 │   ├── fungi-server.service
 │   └── fungi-sampler.service
@@ -131,7 +138,9 @@ mushy/                         # deployed as fungi-forecast/
 `static/*.gz` are generated build artifacts. On-disk JS+CSS is **99,636 bytes**
 (< 100 KB). Flask serves the `.gz` sibling when the client sends
 `Accept-Encoding: gzip`, so the actual browser transfer is only ~38 KB before
-the generated heatmap image (and ~65 KB including it and the gzipped HTML).
+the map image. Only one map renders per view, so the budget check counts the
+largest single layer (~20-30 KB) rather than the sum of all four:
+`python scripts/verify.py` asserts both numbers stay under 100 KB.
 
 ---
 
@@ -250,11 +259,34 @@ path differs. Both services restart automatically and survive a reboot.
 | GET | `/` | dashboard HTML |
 | GET | `/partials/cards` | HTMX fragment: T/RH/lux/FGPI cards |
 | GET | `/partials/species` | HTMX fragment: ranked species table |
-| GET | `/partials/heatmap` | HTMX fragment: cache-busted `<img>` |
+| GET | `/partials/heatmap?layer=<key>` | HTMX fragment: dropdown + cache-busted `<img>` |
 | GET | `/api/latest` | latest reading + `fgpi`, `risk_class`, `species` |
 | GET | `/api/series?hours=6` | uPlot arrays: `ts`, `fgpi`, `humidity`, … |
-| GET | `/heatmap.png` | generated PNG (no-store, cache-busted by query) |
+| GET | `/api/maps` | layer metadata for the dropdown (`key`, `label`, `unit`, `url`) |
+| GET | `/heatmap.png` | FGPI PNG (alias of `/maps/fgpi.png`, kept for the spec URL) |
+| GET | `/maps/<layer>.png` | PNG for `fgpi`, `temperature`, `humidity` or `lux` (`404` otherwise) |
 | POST | `/api/ingest` | accept a remote-node reading (JSON) |
+
+### Map layers
+
+The map panel has a dropdown; each layer is an independent PNG so one view
+costs one request. `fgpi` keeps its spec signature (`render_png`); the others
+reuse the same interpolation and Matplotlib code with their own colour ramp and
+domain:
+
+| Layer | Domain | Notes |
+|---|---|---|
+| `fgpi` | 0-100 | IDW/cubic per `spatial.method`, clamped to the index range |
+| `temperature` | 0-40 °C | always IDW (cubic overshoots with sparse sensors) |
+| `humidity` | 0-100 %RH | always IDW |
+| `lux` | log10(1+lux) | log scale, because indoor light spans orders of magnitude |
+
+Every map labels each measured site with `node_id`, its FGPI/risk class and the
+top predicted species. Only measured sites are labelled; interpolated cells are
+never given a species name, so the map cannot be read as an identification at a
+location with no sensor. Lux is growth-neutral in FGPI (`f_L = 1.0`) and is
+shown for context only.
+
 
 ```bash
 curl http://localhost:5000/api/latest
@@ -298,7 +330,10 @@ Single page, `max-w-6xl`, responsive `grid-cols-1 md:grid-cols-3`:
 - **Four metric cards** — temperature, humidity, lux, FGPI; the FGPI card gets
   a risk ring (`green`/`yellow`/`orange`/`red`).
 - **Species forecast** — ranked top-5, predicted-suitability progress bars.
-- **FGPI map** — Matplotlib PNG with baked-in axes, title and colourbar.
+- **Map panel** — Matplotlib PNG with a **layer dropdown** (FGPI / Temperature /
+  Humidity / Light). Each measured site is annotated with its node id, FGPI
+  score, risk class and top predicted species. Axes, title and colourbar are
+  baked into the PNG.
 - **Time series** — uPlot line chart of FGPI and RH over the last 6 h.
 
 HTMX partially refreshes each panel independently:
@@ -307,11 +342,13 @@ HTMX partially refreshes each panel independently:
 |---|---|---|
 | Cards | `/partials/cards` | `every 5s` |
 | Species | `/partials/species` | `every 10s` |
-| Heatmap | `/partials/heatmap` | `every 30s` |
+| Map | `/partials/heatmap?layer=<key>` | `every 30s` + `change` on the dropdown |
 | Chart | `/api/series` (fetch) | `every 30s` |
 
 No full-page reloads and no SPA framework. Chart refreshes share the same data
-window as the map.
+window as the map. The dropdown selection survives the 30 s refresh because the
+active layer is embedded in the poll URL (`hx-vals` on an ancestor would win
+over the select's own value in htmx 1.9, so it is deliberately not used).
 
 ### Static asset budget
 
@@ -322,7 +359,8 @@ window as the map.
 | `dashboard.css` | 3,627 B | 1,310 B |
 | `uplot.min.css` | 1,883 B | 768 B |
 | **Total JS + CSS** | **99,636 B** | **37,611 B** |
-| `heatmap.png` (generated) | 9–38 KB | same |
+| `map-<layer>.png` (generated, one per view) | 20–39 KB raw; 11 KB with a
+  single fixed node | same |
 | dashboard HTML (gzip) | — | ~3 KB |
 
 Full dashboard transfer in devtools is roughly **50–80 KB** including the
@@ -415,6 +453,51 @@ real-world accuracy.
 
 ---
 
+## Dataset check (FGPI calibration)
+
+`species_curves.json` covers *which* species fit a niche. Separately,
+`scripts/dataset_check.py` asks whether the FGPI axis itself behaves.
+
+Dataset used — the only one found with all three required columns and a clear
+licence:
+
+| | |
+|---|---|
+| Title | *Low-Cost Indoor Air Quality Monitor with Mould Risk Prediction on an ESP32* |
+| DOI | [`10.6084/m9.figshare.35080789`](https://figshare.com/articles/dataset/Data_and_code_for_Low-Cost_Indoor_Air_Quality_Monitor_with_Mould_Risk_Prediction_on_an_ESP32/35080789) |
+| Licence | CC BY 4.0 |
+| Columns | `temperature_c`, `humidity_pct`, mould index (Hukka–Viitanen / ASHRAE 160) |
+| Size | 12,934 real ESP32 readings + 8,760 modelled hourly rows |
+
+```bash
+python scripts/dataset_check.py            # downloads once into .fungi/datasets/
+python scripts/dataset_check.py --csv my.csv
+python scripts/dataset_check.py --write-fixture   # offline sample for CI
+```
+
+It reports Spearman correlation, the reference growth rate per FGPI class, and a
+monotonicity check. Results on the reference file:
+
+```
+growth per hour by FGPI class: low -0.0002 | moderate +0.0008 | high +0.0017 | critical +0.0021
+→ monotonic: yes
+```
+
+**Known calibration gap (flagged, not silently tuned):** the reference index
+first becomes measurably active at FGPI class *moderate*, not *critical*.
+FGPI's `f_RH` ramps from 60 %RH while Hukka–Viitanen needs ~80 % surface RH, so
+FGPI acts as an **early-warning growth-potential index**, not a formation-risk
+index. The spec (§8) freezes the FGPI formula, so the deviation is documented
+here rather than retuned. Class thresholds also deliberately run ahead of the
+reference; treat `high`/`critical` as "conditions permit growth", not "mould is
+present".
+
+Rejected on sight per spec §13: AI-generated sets such as
+`PsilocybeEnvironmentalSensitivity`. The checker refuses filenames containing
+`psilocybe` or synthetic/AI markers.
+
+---
+
 ## Bluetooth PAN
 
 The Flask app is interface-agnostic: it binds `0.0.0.0:5000`, so the same URL
@@ -455,7 +538,7 @@ purely an access path.
 One command covers the automatable criteria (throwaway DB, simulated sensors):
 
 ```bash
-python scripts/verify.py -v    # 11/11 passed, ~10 s
+python scripts/verify.py -v    # 14/14 passed, ~15 s
 ```
 
 The manual walkthrough below is for checking a live deployment by hand:
@@ -471,16 +554,20 @@ python scripts/sample_loop.py --once
 # 3. JSON API
 curl -s http://localhost:5000/api/latest | python -m json.tool
 
-# 4. PNG under 3 s once data exists
-time curl -s -o /tmp/heatmap.png http://localhost:5000/heatmap.png
-file /tmp/heatmap.png
+# 4. every map layer under 3 s once data exists
+for l in fgpi temperature humidity lux; do
+  time curl -s -o /tmp/$l.png http://localhost:5000/maps/$l.png
+  file /tmp/$l.png
+done
+curl -s http://localhost:5000/api/maps
 
 # 5. dashboard + polling attributes
-curl -s http://localhost:5000/ | grep -E 'hx-trigger|uplot|htmx'
+curl -s http://localhost:5000/ | grep -E 'hx-trigger|uplot|htmx|map-layer'
 
-# 6. assets
+# 6. assets (one map per view, not four)
 du -b static/dashboard.css static/htmx.min.js static/uplot.min.js static/uplot.min.css
 # 99636 total on disk; browser devtools shows ~38 KB transferred (gzip)
+ls -l static/map-*.png
 
 # 7. parametric fallback with no ML model
 python -c "from app.models.species import predict_species; print(predict_species(23,88,100))"
@@ -495,9 +582,10 @@ curl -X POST http://localhost:5000/api/ingest \
   -d '{"temperature":24,"humidity":85,"lux":100,"x":7,"y":3,"node_id":"node-b"}'
 ```
 
-All partials use `hx-trigger="every Ns"` with `hx-swap="innerHTML"`; verifying
-with browser devtools shows only the fragment requests, never a full document
-reload.
+All partials use `hx-trigger="every Ns"` with `hx-swap`; verifying with browser
+devtools shows only the fragment requests, never a full document reload. The
+map panel swaps its container (`outerHTML`) so the dropdown keeps working after
+each refresh.
 
 ---
 
@@ -510,8 +598,16 @@ reload.
   against local data before acting on it.
 - **Microclimate matters.** DHT22 accuracy is roughly ±0.5 °C / ±2 % RH. Enclose
   the sensor with airflow and keep it out of direct sunlight and condensation.
-- **FGPI is light-neutral.** Lux is stored and shown, and only mildly modulates
-  some species curves via `lux_pref`.
+- **FGPI is light-neutral.** Lux is stored and shown as its own log-scale map,
+  and only mildly modulates some species curves via `lux_pref`.
+- **Maps are interpolated surfaces, not measurements.** Site labels name the
+  species *predicted at that sensor*; neighbouring colour is IDW-smoothed and
+  carries no species identity. Between sensors the field is a model output.
+- **Lux map is log-scaled** and excludes unreadable samples (`read_lux() == -1`);
+  a dataset with no usable lux renders a `503` for that layer only.
+- **FGPI runs ahead of ASHRAE/Hukka–Viitanen** (see
+  [Dataset check](#dataset-check-fgpi-calibration)): `high`/`critical` mean
+  "conditions can support growth", not "mould is growing".
 - **Spatial map quality depends on node coverage.** A single fixed node yields a
   uniform surface. Add `x`/`y` via `/api/ingest` or run `--mobile` to exercise
   interpolation. IDW smooths; it does not model airflow or building geometry.

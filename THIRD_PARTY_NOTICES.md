@@ -3,6 +3,15 @@
 This project vendors two minified JavaScript/CSS libraries in `static/` so the
 Raspberry Pi never needs Node or a CDN at runtime.
 
+## Validation dataset (not vendored)
+
+*Low-Cost Indoor Air Quality Monitor with Mould Risk Prediction on an ESP32*
+— figshare DOI `10.6084/m9.figshare.35080789`, **CC BY 4.0**.
+Used by `scripts/dataset_check.py` for FGPI calibration checks only. It is
+downloaded on demand into `.fungi/datasets/` (git-ignored) and is not shipped
+with or required at runtime by this project. Attribution: the dataset authors,
+as listed on the figshare record.
+
 ## htmx 1.9.12
 
 - Project: https://htmx.org / https://github.com/bigskysoftware/htmx
