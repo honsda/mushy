@@ -142,7 +142,7 @@ mushy/                         # deployed as fungi-forecast/
 ├── config.yaml
 ├── requirements.txt
 ├── requirements-dev.txt         # + pytest, dev/CI only
-├── tests/                       # pytest: fgpi, species, db, api
+├── tests/                       # pytest: fgpi, species, db, api, alerts, stream
 ├── .github/workflows/ci.yml     # compile + pytest + budget guardrails
 └── README.md
 ```
@@ -709,7 +709,7 @@ One command covers the automatable criteria (throwaway DB, simulated sensors):
 
 ```bash
 python scripts/verify.py -v    # 20/20 passed, ~20 s
-python -m pytest tests -q      # 34 unit/API tests, no hardware
+python -m pytest tests -q      # 52 unit/API tests, no hardware
 ```
 
 The manual walkthrough below is for checking a live deployment by hand:

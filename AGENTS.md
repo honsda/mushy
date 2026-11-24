@@ -45,7 +45,7 @@ training, BT PAN. Load only the section you need.
 
 ```bash
 python scripts/verify.py -v          # full acceptance gate (20 checks)
-python -m pytest tests -q            # 43 unit/API tests, throwaway DB
+python -m pytest tests -q            # 52 unit/API tests, throwaway DB
 python -m pytest tests -q            # unit/API tests, no hardware
 python scripts/check_budget.py       # advisory RSS/latency/asset budget
 python scripts/db_maintenance.py --prune-days 90 --backup backups --vacuum

@@ -21,6 +21,7 @@ from flask import (
     request,
     send_file,
     session,
+    stream_with_context,
 )
 from werkzeug.security import safe_join
 
@@ -810,7 +811,12 @@ def create_app(config_path: str | None = None) -> Flask:
                         yield ": keepalive\n\n"
                 time.sleep(1.0)
 
-        response = Response(generate(), mimetype="text/event-stream")
+        # Without stream_with_context the request context is torn down before
+        # the generator body runs, so the first render_template() inside it
+        # raises "Working outside of request context" and the stream dies.
+        response = Response(
+            stream_with_context(generate()), mimetype="text/event-stream"
+        )
         response.headers["Cache-Control"] = "no-store"
         response.headers["X-Accel-Buffering"] = "no"
         return response
