@@ -84,7 +84,11 @@ fungi-forecast/
 │       └── partials/
 │           ├── cards.html
 │           ├── species.html
-│           └── heatmap.html
+│           ├── heatmap.html
+│           ├── nodes.html          # Phase 4: per-node status table
+│           ├── label_widget.html   # Phase 2: present/absent buttons per species
+│           ├── label_modal.html    # Phase 2: the form the widget opens
+│           └── label_saved.html    # Phase 2: inline confirmation
 ├── static/
 │   ├── dashboard.css          # precompiled Tailwind
 │   ├── htmx.min.js
@@ -93,7 +97,14 @@ fungi-forecast/
 │   └── heatmap.png
 ├── scripts/
 │   ├── build_tailwind.sh      # run on dev machine, not Pi
-│   ├── train_species.py       # offline training
+│   ├── train_species.py       # offline training (+ --region/--cv/--out)
+│   ├── nightly_sgd_update.py  # Phase 3: 02:00 partial_fit, logs/sgd_last_run.txt
+│   ├── compress_model.py      # Phase 3: joblib compress=3, guarded pruning
+│   ├── merge_training_data.py # Phase 2: labels + negatives -> training CSV
+│   ├── fetch_regional_data.py # Phase 1: GBIF/Figshare bbox filter
+│   ├── migrate_db.py          # Phase 4: idempotent v2 (labels) / v3 (FK) migration
+│   ├── db_maintenance.py      # Phase 4: prune/backup/vacuum
+│   ├── check_budget.py        # Phase 3: Pi 4 RSS/latency/asset budget
 │   ├── sample_loop.py         # 30s sampling daemon
 │   └── init_db.py
 ├── config.yaml
@@ -230,6 +241,16 @@ Values sourced from published T-RH growth isopleth literature. Agent must docume
 | GET | `/api/series?hours=6` | JSON: time series for uPlot |
 | GET | `/heatmap.png` | PNG heatmap (cache-busted) |
 | POST | `/api/ingest` | Accept reading from remote node (JSON) |
+| POST | `/api/labels` | Record a manual observation (JSON or form-encoded) |
+| GET | `/api/labels` | Labels since `?since=`, with counts |
+| GET | `/api/labels/export.csv` | Label CSV for retraining |
+| GET | `/api/nodes` | Per-node `last_seen`/`age_s`/`t_avg`/`rh_avg`, `status` (`green`/`yellow`/`red`) |
+| GET | `/partials/nodes` | HTMX fragment: node status table |
+| GET | `/partials/label_modal` | HTMX fragment: the label form (`reading_id`, `species`, `observed`) |
+| GET | `/partials/label_modal/close` | `204`, empties the modal host |
+| GET | `/api/export.csv?table=…` | Reading/species export with `from`/`to` |
+| GET | `/stream` | SSE stream, only when `ui.transport: sse` |
+| GET | `/maps/<layer>.png` | Per-layer PNG (`fgpi`/`temperature`/`humidity`/`lux`) |
 
 All partials refresh via `hx-trigger="every 5s"` (cards) / `every 10s` (species) / `every 30s` (heatmap).
 

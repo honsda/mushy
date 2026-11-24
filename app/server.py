@@ -20,6 +20,7 @@ from flask import (
     render_template,
     request,
     send_file,
+    session,
 )
 from werkzeug.security import safe_join
 
@@ -27,7 +28,12 @@ import app.db as db
 from app import STATIC_DIR, TEMPLATE_DIR, load_config
 from app.alerts import maybe_alert
 from app.models.fgpi import compute_fgpi
-from app.models.species import backend_name, confidence_for, predict_species
+from app.models.species import (
+    backend_name,
+    confidence_for,
+    curve_names,
+    predict_species,
+)
 from app.schemas import ValidationError, validate_label, validate_reading
 from app.spatial.heatmap import render_layer_png
 from app.spatial.interpolate import grid_data, grid_values
@@ -131,6 +137,9 @@ def create_app(config_path: str | None = None) -> Flask:
         template_folder=str(TEMPLATE_DIR),
     )
     app.config["FUNGI_CONFIG"] = cfg
+    # Only used to derive the per-session label token; regenerated on restart
+    # unless the operator pins server.secret_key.
+    app.secret_key = cfg.get("server", {}).get("secret_key") or os.urandom(32)
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
@@ -382,6 +391,7 @@ def create_app(config_path: str | None = None) -> Flask:
             "layers": [LAYERS[k] for k in layer_keys()],
             "nodes": db.node_status(interval),
             "interval_seconds": interval,
+            "label_token": _label_token(),
         }
 
     # ------------------------------------------------------------- static files
@@ -585,6 +595,28 @@ def create_app(config_path: str | None = None) -> Flask:
         )
 
     # ------------------------------------------------------------------ labels
+    def _label_token() -> str:
+        """Per-session token so the dashboard can label without the ingest token.
+
+        Generated at first use and kept in the (signed) session cookie, so it
+        cannot be forged and dies with the session. `server.auth.ingest_token`
+        still works for scripts.
+        """
+        token = session.get("label_token")
+        if not token:
+            token = os.urandom(16).hex()
+            session["label_token"] = token
+        return token
+
+    def _label_token_ok() -> bool:
+        import hmac
+
+        presented = request.headers.get("X-Label-Session") or request.form.get(
+            "label_token", ""
+        )
+        expected = session.get("label_token")
+        return bool(presented and expected and hmac.compare_digest(presented, expected))
+
     def _same_origin() -> bool:
         """True when the request came from the dashboard itself.
 
@@ -602,7 +634,9 @@ def create_app(config_path: str | None = None) -> Flask:
     @app.post("/api/labels")
     def api_labels_create():
         if ingest_token and not _token_ok(ingest_token):
-            allow_ui = bool(auth_cfg.get("allow_dashboard_labels", True)) and _same_origin()
+            allow_ui = bool(auth_cfg.get("allow_dashboard_labels", True)) and (
+                _label_token_ok() or _same_origin()
+            )
             if not allow_ui:
                 response = jsonify({"error": "unauthorized"})
                 response.status_code = 401
@@ -628,7 +662,42 @@ def create_app(config_path: str | None = None) -> Flask:
             )
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
+        if request.headers.get("HX-Request"):
+            return render_template(
+                "partials/label_saved.html",
+                label_id=label_id,
+                species=label["species"],
+                observed=label["observed"],
+            ), 201
         return jsonify({"ok": True, "id": label_id, **label}), 201
+
+    @app.get("/partials/label_modal")
+    def label_modal():
+        """Modal fragment for the per-species present/absent buttons."""
+        try:
+            reading_id = int(request.args.get("reading_id", "0"))
+        except (TypeError, ValueError):
+            reading_id = 0
+        species_name = (request.args.get("species") or "").strip()
+        observed = str(request.args.get("observed", "1")).lower() in {"1", "true", "yes"}
+        known = set(curve_names())
+        if reading_id <= 0 or not species_name:
+            abort(400)
+        if known and species_name not in known:
+            # The UI only offers names it displayed, so an unknown one means a
+            # hand-crafted request; refuse rather than store a typo as a class.
+            abort(400)
+        return render_template(
+            "partials/label_modal.html",
+            reading_id=reading_id,
+            species=species_name,
+            observed=observed,
+            label_token=_label_token(),
+        )
+
+    @app.get("/partials/label_modal/close")
+    def label_modal_close():
+        return "", 204
 
     @app.get("/api/labels")
     def api_labels_list():

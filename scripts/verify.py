@@ -339,7 +339,9 @@ def check_nodes_and_export():
     nodes = client().get("/api/nodes").get_json()
     assert nodes["count"] >= 1, nodes
     row = nodes["nodes"][0]
-    assert row["status"] in {"green", "amber", "red"}, row
+    assert row["status"] in {"green", "yellow", "red"}, row
+    for spec_key in ("last_seen", "age_s", "t_avg", "rh_avg"):
+        assert spec_key in row, spec_key
     now = int(time.time())
     export = client().get(f"/api/export.csv?table=readings&from={now - 3600}&to={now + 60}")
     assert export.status_code == 200, export.status_code

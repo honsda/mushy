@@ -1,0 +1,18 @@
+{# Per-species manual labelling controls (spec 2.3).
+   Each button fetches the modal into #label-modal; nothing is captured or
+   identified automatically. #}
+{% set modal_url = url_for('label_modal') %}
+<div class="flex gap-2 mt-1">
+  <button type="button"
+          class="rounded bg-emerald-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-emerald-700"
+          title="I saw this species at the current reading"
+          hx-get="{{ modal_url }}?reading_id={{ reading_id }}&species={{ species|urlencode }}&observed=1"
+          hx-target="#label-modal"
+          hx-swap="innerHTML">&#10003; present</button>
+  <button type="button"
+          class="rounded bg-slate-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-slate-700"
+          title="I looked and did not see this species at the current reading"
+          hx-get="{{ modal_url }}?reading_id={{ reading_id }}&species={{ species|urlencode }}&observed=0"
+          hx-target="#label-modal"
+          hx-swap="innerHTML">&#10007; absent</button>
+</div>

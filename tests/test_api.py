@@ -131,7 +131,11 @@ def test_labels_reject_unknown_reading_and_bad_species(app_client):
 def test_nodes_and_export_csv(app_client):
     nodes = app_client.get("/api/nodes").get_json()
     assert nodes["count"] >= 1
-    assert {"node_id", "status", "age_seconds", "risk_class"} <= set(nodes["nodes"][0])
+    row = nodes["nodes"][0]
+    # Spec field names plus the aliases the dashboard already reads.
+    assert {"node_id", "status", "age_seconds", "risk_class"} <= set(row)
+    assert {"last_seen", "age_s", "t_avg", "rh_avg"} <= set(row)
+    assert row["status"] in {"green", "yellow", "red"}
 
     now = int(time.time())
     export = app_client.get(
@@ -143,6 +147,67 @@ def test_nodes_and_export_csv(app_client):
     assert app_client.get("/api/export.csv?table=sqlite_master").status_code == 400
     assert app_client.get("/api/export.csv?table=readings&from=999&to=1").status_code == 400
 
+
+def test_label_modal_roundtrip(app_client):
+    """The per-species widget loads a modal and posts with a session token."""
+    reading_id = _latest_reading_id()
+    species = "Aspergillus versicolor"
+
+    page = app_client.get("/")
+    assert page.status_code == 200
+    html = page.get_data(as_text=True)
+    assert 'id="label-modal"' in html
+    assert "partials/label_widget" not in html  # included, not referenced
+    assert "present" in html
+
+    modal = app_client.get(
+        "/partials/label_modal",
+        query_string={"reading_id": reading_id, "species": species, "observed": 1},
+    )
+    assert modal.status_code == 200
+    body = modal.get_data(as_text=True)
+    assert species in body
+    assert "X-Label-Session" in body
+
+    # Bad input is refused rather than stored.
+    assert (
+        app_client.get(
+            "/partials/label_modal",
+            query_string={"reading_id": 0, "species": species},
+        ).status_code
+        == 400
+    )
+    assert (
+        app_client.get(
+            "/partials/label_modal",
+            query_string={"reading_id": reading_id, "species": "Morchella esculenta"},
+        ).status_code
+        == 400
+    )
+    assert app_client.get("/partials/label_modal/close").status_code == 204
+
+def test_label_session_token_authorises_dashboard_post(app_client):
+    """A forged session token must not bypass the ingest token."""
+    reading_id = _latest_reading_id()
+    payload = {
+        "reading_id": reading_id,
+        "species": "Aspergillus niger",
+        "observed": "1",
+        "confidence": "3",
+    }
+    forged = app_client.post(
+        "/api/labels",
+        data={**payload, "label_token": "0" * 32},
+        headers={"X-Label-Session": "0" * 32},
+    )
+    assert forged.status_code == 401
+
+    with app_client.session_transaction() as sess:
+        sess["label_token"] = "a" * 32
+    ok = app_client.post(
+        "/api/labels", data=payload, headers={"X-Label-Session": "a" * 32}
+    )
+    assert ok.status_code == 201, ok.get_data(as_text=True)[:300]
 
 def test_sse_disabled_by_default(app_client):
     assert app_client.get("/stream").status_code == 404

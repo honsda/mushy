@@ -10,7 +10,7 @@ Group=pi
 WorkingDirectory=/home/pi/fungi-forecast
 Environment=PYTHONUNBUFFERED=1
 Environment=FUNGI_CONFIG=/home/pi/fungi-forecast/config.yaml
-ExecStart=/home/pi/fungi-forecast/.venv/bin/python scripts/incremental_update.py
+ExecStart=/home/pi/fungi-forecast/.venv/bin/python scripts/nightly_sgd_update.py
 Nice=10
 IOSchedulingClass=idle
 # A run that overruns the next sample interval would fight the sampler for I/O.

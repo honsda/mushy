@@ -71,6 +71,10 @@ def test_node_status_marks_staleness(fresh_db):
     now = int(time.time())
     fresh_db.insert_reading(now, 1.0, 1.0, "fresh", 22.0, 80.0, 10.0)
     fresh_db.insert_reading(now - 100, 2.0, 2.0, "stale", 22.0, 80.0, 10.0)
-    status = {row["node_id"]: row["status"] for row in fresh_db.node_status(30)}
-    assert status["fresh"] == "green"
-    assert status["stale"] in {"amber", "red"}
+    rows = {row["node_id"]: row for row in fresh_db.node_status(30)}
+    assert rows["fresh"]["status"] == "green"
+    assert rows["stale"]["status"] in {"yellow", "red"}
+    # Spec-facing names stay available alongside the older ones.
+    assert rows["fresh"]["age_s"] == rows["fresh"]["age_seconds"]
+    assert rows["fresh"]["t_avg"] == rows["fresh"]["temperature"]
+    assert rows["fresh"]["last_seen"] == rows["fresh"]["last_ts"]

@@ -15,6 +15,7 @@ suitability scores only.
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,8 @@ RF_PATH = MODEL_DIR / "species_rf.joblib"
 # Optional East Java overlay: loaded after the base table and merged per species.
 CURVES_INDONESIA_PATH = MODEL_DIR / "species_curves_indonesia.json"
 REGION = "east_java"
+
+log = logging.getLogger("fungi.species")
 
 _lock = threading.Lock()
 _curves_cache: tuple[tuple[float, float | None, str], list[dict]] | None = None
@@ -194,19 +197,35 @@ def _rh_membership(rh: float, rh_min: float, rh_opt: float) -> float:
 
 
 def _lux_membership(lux: float | None, pref: Any) -> float:
+    """Soft light preference, floored at 0.5.
+
+    Light is growth-neutral in FGPI, the BH1750 saturates in daylight and the
+    curve table's `lux_pref.max` values are indoor-scale. A hard triangular
+    cutoff therefore zeroed every species that carries a preference as soon as
+    a room got bright (5000 lx). Keeping the modifier in [0.5, 1.0] ranks
+    light-loving species higher without erasing them.
+    """
     if lux is None or lux < 0:
         return 1.0  # no usable light reading -> neutral
     if isinstance(pref, dict):
-        return _triangular(
-            float(lux),
-            float(pref.get("min", 0.0)),
-            float(pref.get("opt", 50.0)),
-            float(pref.get("max", 1000.0)),
+        return max(
+            0.5,
+            _triangular(
+                float(lux),
+                float(pref.get("min", 0.0)),
+                float(pref.get("opt", 50.0)),
+                float(pref.get("max", 1000.0)),
+            ),
         )
     if isinstance(pref, (int, float)):
         opt = float(pref)
         return _triangular(float(lux), 0.0, opt, max(1000.0, opt * 10.0))
     return 1.0
+
+
+def curve_names() -> list[str]:
+    """Known species names from the active curve table (base + overlay)."""
+    return [str(curve.get("name", "")) for curve in _load_curves() if curve.get("name")]
 
 
 def _parametric(T: float, RH: float, L: float | None) -> list[dict]:
@@ -242,9 +261,9 @@ def _in_training_range(T: float, RH: float, L: float | None) -> bool | None:
     ranges = (_meta().get("feature_ranges") or {}) if _meta() else {}
     if not ranges:
         return None
+    # Temperature and humidity decide; lux is growth-neutral and routinely
+    # saturated, so it must not downgrade confidence on its own.
     checks = [("temperature", T), ("humidity", RH)]
-    if L is not None and L >= 0:
-        checks.append(("lux", L))
     for name, value in checks:
         bounds = ranges.get(name)
         if not isinstance(bounds, (list, tuple)) or len(bounds) != 2:
@@ -291,9 +310,32 @@ def _sgd_proba(T: float, RH: float, L: float | None) -> dict[str, float] | None:
     return proba or None
 
 
+def _blend_settings(cfg: dict) -> tuple[bool, float]:
+    """(enabled, sgd_weight) from `species.blend`, falling back to the flat key."""
+    block = cfg.get("blend") or {}
+    enabled = bool(block.get("enabled", True)) and bool(sgd_block_enabled(cfg))
+    weight = block.get("sgd_weight", cfg.get("blend_sgd_weight", 0.3))
+    try:
+        weight = float(weight)
+    except (TypeError, ValueError):
+        weight = 0.3
+    return enabled, max(0.0, min(1.0, weight))
+
+
+def sgd_block_enabled(cfg: dict) -> bool:
+    return bool((cfg.get("sgd") or {}).get("enabled", True))
+
+
 def _blend(ranked: list[dict], sgd: dict[str, float], weight: float) -> list[dict]:
     """Weighted average of the SGD adapter and the RF/parametric posterior."""
     weight = max(0.0, min(1.0, float(weight)))
+    log.debug(
+        "blend rf_weight=%.2f sgd_weight=%.2f rf_top=%s sgd_top=%s",
+        1.0 - weight,
+        weight,
+        ranked[0]["species"] if ranked else None,
+        max(sgd, key=sgd.get) if sgd else None,
+    )
     blended: list[dict] = []
     for entry in ranked:
         name = entry["species"]
@@ -341,9 +383,11 @@ def predict_species(T: float, RH: float, L: float = -1.0) -> list[dict]:
             ranked = _ml(t, rh, lux)
         if ranked is None:
             ranked = _parametric(t, rh, lux)
+        ranked_for_blend = ranked
         sgd = _sgd_proba(t, rh, lux)
-        if ranked and sgd:
-            ranked = _blend(ranked, sgd, cfg.get("blend_sgd_weight", 0.3))
+        blend_enabled, blend_weight = _blend_settings(cfg)
+        if ranked_for_blend and sgd and blend_enabled:
+            ranked = _blend(ranked_for_blend, sgd, blend_weight)
 
     if not ranked:
         ranked = [

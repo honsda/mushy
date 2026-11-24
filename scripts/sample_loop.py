@@ -78,6 +78,25 @@ def sample_once(cfg: dict, node_id: str, position: tuple[float, float] | None) -
     fgpi_id = insert_fgpi(reading_id, ts, score, risk)
     insert_species_predictions(fgpi_id, species)
 
+    # Alert from the process that measured it, so a restarted web server cannot
+    # swallow a critical event. maybe_alert() never raises.
+    try:
+        from app.alerts import maybe_alert
+
+        maybe_alert(
+            {
+                "fgpi": score,
+                "risk_class": risk,
+                "temperature": temperature,
+                "humidity": humidity,
+                "node_id": node_id,
+                "ts": ts,
+            },
+            cfg,
+        )
+    except Exception:
+        log.exception("alert dispatch failed")
+
     return {
         "ts": ts,
         "reading_id": reading_id,

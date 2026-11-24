@@ -11,3 +11,5 @@ fungi.db-shm
 *.log
 .DS_Store
 fungi.db.bak
+logs/*.txt
+static/map-*.png

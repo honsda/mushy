@@ -125,6 +125,10 @@ mushy/                         # deployed as fungi-forecast/
 ├── scripts/
 │   ├── build_tailwind.sh      # dev machine only
 │   ├── train_species.py       # offline training
+│   ├── nightly_sgd_update.py  # 02:00 adapter update (systemd timer)
+│   ├── compress_model.py      # joblib compress + guarded pruning
+│   ├── merge_training_data.py # labels + negatives -> one CSV
+│   ├── migrate_db.py          # idempotent v2/v3 migration for old DBs
 │   ├── dataset_check.py       # FGPI vs published mould-index dataset
 │   ├── verify.py              # one-command §15 acceptance gate
 │   ├── sample_loop.py         # 30 s sampling daemon
@@ -204,8 +208,10 @@ on modern kernels.
 | `species.region` | `east_java` | applies `species_curves_indonesia.json` |
 | `species.model_path` | `""` | explicit joblib; empty = `species_rf_east_java.joblib` if present |
 | `species.top_k` | `5` | ranked species returned/persisted |
-| `species.blend_sgd_weight` | `0.3` | RF/SGD blend after on-device learning |
-| `species.min_new_labels` | `20` | labels required before a nightly `partial_fit` |
+| `species.blend` | `{enabled: true, rf_weight: 0.7, sgd_weight: 0.3}` | blended inference (Phase 3) |
+| `species.blend_sgd_weight` | `0.3` | legacy flat key, used when `blend` is absent |
+| `species.sgd.min_new_labels` | `20` | labels required before a nightly `partial_fit` |
+| `species.min_new_labels` | `20` | legacy flat alias of the above |
 | `server.auth.ingest_token` | `""` | bearer token for writes; empty = open LAN demo |
 | `server.auth.ingest_rate_limit_seconds` | `5` | per-node ingest interval, `429` beyond |
 | `server.auth.allow_dashboard_labels` | `true` | operator's own browser may POST labels |
@@ -283,7 +289,7 @@ systemctl list-timers 'fungi-*' --no-pager
 
 | Timer | When | Does |
 |---|---|---|
-| `fungi-incremental.timer` | nightly 02:00 (`Persistent=true`) | `scripts/incremental_update.py` — absorbs new labels into the SGD adapter |
+| `fungi-incremental.timer` | nightly 02:00 (`Persistent=true`) | `scripts/nightly_sgd_update.py` — absorbs new labels into the SGD adapter (status in `logs/sgd_last_run.txt`) |
 | `fungi-maintenance.timer` | Sunday 03:30 | `scripts/db_maintenance.py --prune-days 90 --backup ~/backups --vacuum` |
 
 Both are `Type=oneshot`, low priority and skip work rather than compete with
@@ -309,7 +315,7 @@ does not turn the unit red.
 | POST | `/api/labels` | record a manual observation (present/absent) |
 | GET | `/api/labels?since=ISO` | labels with their joined reading |
 | GET | `/api/labels/export.csv` | labels + `temperature`/`humidity`/`lux` for retraining |
-| GET | `/api/nodes` | per-node age, status (`green`/`amber`/`red`), latest FGPI |
+| GET | `/api/nodes` | per-node `last_seen`/`age_s`/`t_avg`/`rh_avg`, status (`green`/`yellow`/`red`), latest FGPI |
 | GET | `/api/export.csv?table=readings&from=…&to=…` | streaming CSV, whitelisted tables |
 | GET | `/stream` | SSE push (only when `ui.transport: sse`) |
 
@@ -514,10 +520,15 @@ growth — they are deliberately not used as a training set.
 
 Species predictions are **predicted suitability**, never detections. The Pi
 has no camera and does no visual identification. What it can do is record what
-an operator saw: each species row has a **record sighting** disclosure with
-`✓ present` / `✗ absent`, a 1–5 confidence and an optional note. Rows land in
-the `labels` table joined to the reading that was live at that moment, so a
-label is always attributable to the T/RH/lux that produced it.
+an operator saw: each species row has `✓ present` / `✗ absent` buttons that open
+a small modal (`partials/label_widget.html` → `partials/label_modal.html`) with
+a 1–5 confidence and an optional note. Rows land in the `labels` table joined to
+the reading that was live at that moment, so a label is always attributable to
+the T/RH/lux that produced it.
+
+The modal carries a **session-scoped** token (`X-Label-Session`, minted per
+browser session and signed with the app secret), so the page never contains the
+ingest token. Cross-origin posts still need `Authorization: Bearer …`.
 
 ```bash
 curl -s http://localhost:5000/api/labels | python -m json.tool
@@ -585,7 +596,9 @@ loader hot-reloads on joblib mtime.
 On-device adaptation uses an `SGDClassifier` adapter rather than retraining the
 forest on the Pi: `partial_fit` on new labels at 02:00, blended 0.3/0.7 with the
 RF posterior, guarded by ≥20 new labels, ≥300 MB free RAM and SoC <70 °C. Every
-run logs one line to `logs/incremental.log`.
+run logs one line to `logs/incremental.log` and overwrites
+`logs/sgd_last_run.txt` with a one-line verdict (`updated: 24 labels` or
+`skipped: only 3 new labels (need 20)`).
 
 ---
 

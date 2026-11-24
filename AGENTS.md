@@ -28,7 +28,7 @@ training, BT PAN. Load only the section you need.
 | FGPI formula | `app/models/fgpi.py` |
 | Species ML/parametric | `app/models/species.py`, `app/models/trained/species_curves.json` |
 | East Java overlay | `app/models/trained/species_curves_indonesia.json` |
-| SGD adapter (nightly) | `app/models/species_sgd.py`, `scripts/incremental_update.py` |
+| SGD adapter (nightly) | `app/models/species_sgd.py`, `scripts/nightly_sgd_update.py` |
 | Ingest/label validation | `app/schemas.py` |
 | Alerts (webhook/SMTP) | `app/alerts.py` |
 | Tests | `tests/` (pytest, throwaway DB) |
@@ -45,6 +45,7 @@ training, BT PAN. Load only the section you need.
 
 ```bash
 python scripts/verify.py -v          # full acceptance gate (20 checks)
+python -m pytest tests -q            # 43 unit/API tests, throwaway DB
 python -m pytest tests -q            # unit/API tests, no hardware
 python scripts/check_budget.py       # advisory RSS/latency/asset budget
 python scripts/db_maintenance.py --prune-days 90 --backup backups --vacuum

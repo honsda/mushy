@@ -111,7 +111,7 @@ needed to be certain.
 
 ## On-device adaptation
 
-`fungi-incremental.timer` runs `scripts/incremental_update.py` nightly at
+`fungi-incremental.timer` runs `scripts/nightly_sgd_update.py` nightly at
 02:00. It calls `SGDClassifier.partial_fit` on labels that arrived since the
 last run and blends the result with the RF posterior
 (`species.blend_sgd_weight`, default 0.3).

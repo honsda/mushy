@@ -399,12 +399,19 @@ def node_status(interval_seconds: int = 30) -> list[dict]:
             if age < 2 * interval_seconds:
                 status = "green"
             elif age < 10 * interval_seconds:
-                status = "amber"
+                status = "yellow"
             else:
                 status = "red"
             out.append(
                 {
                     "node_id": latest["node_id"] or "unknown",
+                    # Spec field names (green/yellow/red, last_seen/age_s,
+                    # t_avg/rh_avg) plus the older aliases the dashboard and
+                    # existing clients already read.
+                    "last_seen": int(row["last_ts"]),
+                    "age_s": age,
+                    "t_avg": latest["temperature"],
+                    "rh_avg": latest["humidity"],
                     "last_ts": int(row["last_ts"]),
                     "age_seconds": age,
                     "samples": int(row["samples"]),

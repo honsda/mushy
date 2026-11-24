@@ -1,0 +1,67 @@
+{# Modal body for POST /api/labels. Loaded by label_widget.html into #label-modal. #}
+<div class="label-modal" role="dialog" aria-modal="true" aria-labelledby="label-modal-title">
+  <div class="label-modal-card">
+    <h2 id="label-modal-title" class="font-semibold text-slate-900">
+      Record {% if observed %}presence{% else %}absence{% endif %}
+    </h2>
+    <p class="mt-1 text-xs text-slate-500">
+      <span class="italic">{{ species }}</span> at reading #{{ reading_id }}
+    </p>
+
+    <form class="mt-4 space-y-3"
+          hx-post="{{ url_for('api_labels_create') }}"
+          hx-target="#label-modal"
+          hx-swap="innerHTML"
+          hx-headers='{"X-Label-Session": "{{ label_token }}"}'>
+      <input type="hidden" name="reading_id" value="{{ reading_id }}">
+      <input type="hidden" name="species" value="{{ species }}">
+      <input type="hidden" name="observed" value="{{ 1 if observed else 0 }}">
+
+      <div>
+        <label for="label-confidence" class="block text-xs font-medium text-slate-700">
+          Confidence
+        </label>
+        <div class="mt-1 flex items-center gap-3">
+          <input id="label-confidence" name="confidence" type="range" min="1" max="5"
+                 step="1" value="3" class="flex-1"
+                 hx-on:input="this.nextElementSibling.textContent = this.value">
+          <output class="w-4 text-sm tabular-nums text-slate-700">3</output>
+        </div>
+        <p class="mt-1 text-[11px] text-slate-500">1 = guessed, 5 = unmistakable.</p>
+      </div>
+
+      <div>
+        <label for="label-note" class="block text-xs font-medium text-slate-700">Note</label>
+        <input id="label-note" name="note" type="text" maxlength="280"
+               placeholder="where, what it looked like (optional)"
+               class="mt-1 w-full rounded border border-slate-300 px-2 py-1 text-sm">
+      </div>
+
+      <div>
+        <label for="label-operator" class="block text-xs font-medium text-slate-700">Operator</label>
+        <input id="label-operator" name="operator" type="text" maxlength="40"
+               value="operator"
+               class="mt-1 w-full rounded border border-slate-300 px-2 py-1 text-sm">
+      </div>
+
+      <div class="flex items-center gap-2">
+        <button type="submit"
+                class="rounded bg-emerald-600 px-3 py-1 text-sm font-medium text-white hover:bg-emerald-700">
+          Save observation
+        </button>
+        <button type="button"
+                class="rounded border border-slate-300 px-3 py-1 text-sm text-slate-700 hover:bg-slate-50"
+                hx-get="{{ url_for('label_modal_close') }}"
+                hx-target="#label-modal"
+                hx-swap="innerHTML">
+          Cancel
+        </button>
+      </div>
+
+      <p class="text-[10px] text-slate-500">
+        Manual observation only. No camera, no automatic identification. Saved labels
+        are training data; the forecast itself is predicted suitability.
+      </p>
+    </form>
+  </div>
+</div>

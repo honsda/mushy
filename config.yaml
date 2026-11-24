@@ -34,10 +34,15 @@ species:
   region: east_java      # default | east_java (regional curve overlay)
   model_path: ""         # blank = auto (species_rf_east_java.joblib when east_java)
   top_k: 5
-  blend_sgd_weight: 0.3  # SGD adapter share when one exists
+  blend_sgd_weight: 0.3  # legacy flat key, still honoured when `blend` is absent
+  blend:                 # blended inference (Phase 3): RF posterior + SGD adapter
+    enabled: true
+    rf_weight: 0.7
+    sgd_weight: 0.3      # wins over blend_sgd_weight when present
   min_new_labels: 20     # nightly adapter needs this many unseen labels
   sgd:
     enabled: true
+    min_new_labels: 20
     min_free_mb: 300
     max_soc_temp_c: 70
 alerts:

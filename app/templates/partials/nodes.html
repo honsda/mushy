@@ -27,7 +27,7 @@
         <tr class="border-t border-slate-100">
           <td class="py-1 pr-3 font-medium">{{ node.node_id }}</td>
           <td class="py-1 pr-3">
-            {% set dot = 'bg-emerald-500' if node.status == 'green' else ('bg-amber-500' if node.status == 'amber' else 'bg-red-500') %}
+            {% set dot = 'bg-emerald-500' if node.status == 'green' else ('bg-amber-500' if node.status == 'yellow' else 'bg-red-500') %}
             <span class="inline-flex items-center gap-1.5">
               <span class="h-2 w-2 rounded-full {{ dot }}"></span>
               <span class="text-xs text-slate-600">{{ node.age_seconds }} s ago</span>
