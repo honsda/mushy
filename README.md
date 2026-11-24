@@ -206,7 +206,7 @@ on modern kernels.
 | `sensors.temp_offset`, `humidity_offset`, `lux_scale` | `0.0`, `0.0`, `1.0` | calibration, see [docs/calibration.md](docs/calibration.md) |
 | `species.mode` | `auto` | `auto` = RF if joblib exists, else parametric |
 | `species.region` | `east_java` | applies `species_curves_indonesia.json` |
-| `species.model_path` | `""` | explicit joblib; empty = `species_rf_east_java.joblib` if present |
+| `species.model_path` | `""` | explicit joblib (repo-relative or absolute); empty = `species_rf_east_java.joblib` if present |
 | `species.top_k` | `5` | ranked species returned/persisted |
 | `species.blend` | `{enabled: true, rf_weight: 0.7, sgd_weight: 0.3}` | blended inference (Phase 3) |
 | `species.blend_sgd_weight` | `0.3` | legacy flat key, used when `blend` is absent |

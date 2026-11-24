@@ -120,3 +120,37 @@ def test_migrate_db_is_idempotent(tmp_path, monkeypatch):
     second = migrate_db.migrate()
     assert second["changes"] == ["already current"]
     assert "backup" not in second
+
+def test_model_path_resolves_from_the_repo_root(tmp_path, monkeypatch):
+    """`docs/retraining.md` says `app/models/trained/x.joblib`; that must work.
+
+    A relative path used to resolve against app/models/trained/ unless it
+    happened to start with "app/", so any other spelling silently fell back to
+    the parametric tier.
+    """
+    from app import BASE_DIR, MODEL_DIR
+
+    from app import load_config as real_load_config
+
+    def _patched(model_path: str):
+        def loader(path=None):
+            cfg = real_load_config(path)
+            cfg.setdefault("species", {})["model_path"] = model_path
+            return cfg
+
+        monkeypatch.setattr(species, "load_config", loader)
+        return species._model_path()
+
+    repo_relative = tmp_path / "somewhere" / "model.joblib"
+    repo_relative.parent.mkdir(parents=True)
+    repo_relative.write_bytes(b"x")
+    monkeypatch.setattr(species, "BASE_DIR", tmp_path)
+    assert _patched("somewhere/model.joblib") == repo_relative
+
+    # A bare filename still means app/models/trained/<name>.
+    bare = MODEL_DIR / "species_rf.joblib"
+    monkeypatch.setattr(species, "BASE_DIR", BASE_DIR)
+    assert _patched("species_rf.joblib") == bare
+
+    # An absolute path is taken as given.
+    assert _patched(str(repo_relative)) == repo_relative

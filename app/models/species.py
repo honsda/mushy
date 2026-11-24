@@ -20,7 +20,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from app import MODEL_DIR, load_config
+from app import BASE_DIR, MODEL_DIR, load_config
 
 CURVES_PATH = MODEL_DIR / "species_curves.json"
 RF_PATH = MODEL_DIR / "species_rf.joblib"
@@ -122,13 +122,26 @@ def _load_curves() -> list[dict]:
 
 
 def _model_path():
-    """Regional model if configured, else the default joblib path."""
+    """Regional model if configured, else the default joblib path.
+
+    A relative `model_path` is read from the repository root first (what
+    `docs/retraining.md` tells an operator to write), then from
+    app/models/trained/, so both spellings work and a typo never silently
+    demotes the deployment to the parametric tier without a hint.
+    """
     species_cfg = load_config().get("species", {})
     configured = species_cfg.get("model_path")
     if configured:
-        path = Path(str(configured))
+        path = Path(str(configured)).expanduser()
         if not path.is_absolute():
-            path = MODEL_DIR.parent.parent / path if str(configured).startswith("app/") else MODEL_DIR / path
+            candidates = [BASE_DIR / path, MODEL_DIR / path]
+            found = next((c for c in candidates if c.exists()), None)
+            if found is not None:
+                path = found
+            else:
+                # Nothing on disk: a bare filename means the trained/ folder,
+                # anything with a directory means the repository root.
+                path = (MODEL_DIR / path) if path.parent == Path(".") else (BASE_DIR / path)
         return path
     if region() == REGION:
         regional = MODEL_DIR / "species_rf_east_java.joblib"
