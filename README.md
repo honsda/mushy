@@ -459,14 +459,26 @@ f_T(T)  = 0              T <= 5 or T >= 35
         = (T-5)/15       5 < T < 20
         = 1              20 <= T <= 25
         = (35-T)/10      25 < T < 35
-f_RH(RH) = 0             RH <= 60
-         = (RH-60)/20    60 < RH < 80
-         = 1             RH >= 80
+f_RH(RH) = 0                        RH <= 40      (smooth, default)
+         = 3t^2 - 2t^3  t=(RH-40)/50   40 < RH < 90
+         = 1                        RH >= 90
 f_L(L)  = 1.0            light-neutral by design
 
 FGPI = 100 * f_T * f_RH
 risk_class: <25 low | 25-50 moderate | 50-75 high | >75 critical
 ```
+
+`fgpi.humidity_curve: spec` restores the literal §8 ramp (0 below 60 %RH,
+1 above 80). The shipped default is the smoothstep above because the literal
+ramp is a cliff: it holds the index at exactly 0 for every reading below
+60 %RH, so ordinary indoor air never moves the number, and then jumps
+0 -> 100 across 20 %RH. Both curves agree at the endpoints; the smooth one
+simply responds everywhere in between:
+
+| RH (at 22-25 °C) | 40 | 50 | 60 | 70 | 80 | 90 |
+|---|---|---|---|---|---|---|
+| FGPI, `smooth` | 0 | 10 | 35 | 65 | 90 | 100 |
+| FGPI, `spec` | 0 | 0 | 0 | 50 | 100 | 100 |
 
 Light is recorded and displayed but intentionally not weighted in FGPI: cheap
 lux sensors are easy to shadow or saturate, and the seed species respond
@@ -662,16 +674,16 @@ It reports Spearman correlation, the reference growth rate per FGPI class, and a
 monotonicity check. Results on the reference file:
 
 ```
-growth per hour by FGPI class: low -0.0002 | moderate +0.0008 | high +0.0017 | critical +0.0021
+growth per hour by FGPI class: low -0.0002 | moderate +0.0008 | high +0.0018 | critical +0.0020
 → monotonic: yes
 ```
 
 **Known calibration gap (flagged, not silently tuned):** the reference index
 first becomes measurably active at FGPI class *moderate*, not *critical*.
-FGPI's `f_RH` ramps from 60 %RH while Hukka–Viitanen needs ~80 % surface RH, so
-FGPI acts as an **early-warning growth-potential index**, not a formation-risk
-index. The spec (§8) freezes the FGPI formula, so the deviation is documented
-here rather than retuned. Class thresholds also deliberately run ahead of the
+FGPI's `f_RH` starts responding at 40 %RH while Hukka–Viitanen needs ~80 %
+surface RH, so FGPI acts as an **early-warning growth-potential index**, not a
+formation-risk index. That gap is deliberate and documented rather than tuned
+away; set `fgpi.humidity_curve: spec` to get the literal §8 ramp back. Class thresholds also deliberately run ahead of the
 reference; treat `high`/`critical` as "conditions permit growth", not "mould is
 present".
 

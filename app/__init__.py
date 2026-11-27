@@ -23,6 +23,7 @@ _DEFAULTS = {
         "simulate": False,
     },
     "sampling": {"interval_seconds": 30},
+    "fgpi": {"humidity_curve": "smooth", "humidity_range": [40.0, 90.0]},
     "spatial": {
         "x_max": 10.0,
         "y_max": 8.0,

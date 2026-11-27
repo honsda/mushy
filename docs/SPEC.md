@@ -208,6 +208,28 @@ FGPI = 100 * f_T * f_RH * f_L
 risk_class: <25 low | 25-50 moderate | 50-75 high | >75 critical
 ```
 
+**Deviation in force (`fgpi.humidity_curve: smooth`, default).** The `f_RH`
+ramp above is kept as `humidity_curve: spec` for reproducibility, but it is a
+cliff: the index is pinned at exactly 0 for every reading below 60 %RH and then
+climbs 0 -> 100 across 60-80 %RH, so ordinary indoor air (40-55 %RH) never moves
+the number. The shipped default replaces it with a C1-continuous smoothstep
+over `fgpi.humidity_range` (40 -> 90 %RH):
+
+```
+f_RH(RH) = 0                        if RH <= lo
+         = 3t^2 - 2t^3   t = (RH-lo)/(hi-lo)   if lo < RH < hi
+         = 1                        if RH >= hi
+
+lo = 40 %RH, hi = 90 %RH by default
+```
+
+Endpoints keep their meaning (no growth potential at <= lo, saturated at >= hi),
+`f_T`, `f_L`, the risk-class thresholds and every module signature are unchanged.
+The curve is validated by `scripts/dataset_check.py` against the Hukka-Viitanen /
+ASHRAE 160 reference index: risk classes still order monotonically with the
+reference growth rate (`moderate +0.0008, high +0.0018, critical +0.0020` per
+hour). Set `fgpi.humidity_curve: spec` to restore the literal formula.
+
 ---
 
 ### 9. Species Prediction Spec

@@ -45,8 +45,8 @@ Needs: an airtight jar, table salt, distilled water, the DHT22.
    30 °C). Read `RH_measured`, then `humidity_offset = 75.3 − RH_measured`.
 
 Magnesium chloride (33 %RH) or potassium chloride (84 %RH) are alternatives if
-the sensor is badly off; one salt at 75 %RH is enough for a sensor used at
-80–95 %RH, because that is where FGPI lives.
+the sensor is badly off; one salt at 75 %RH is enough for a sensor used in the
+40–90 %RH band where FGPI's `f_RH` responds.
 
 ## 3. Light — dark box
 

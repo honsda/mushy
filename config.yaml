@@ -10,6 +10,13 @@ sensors:
   lux_scale: 1.0         # BH1750 glass-window correction factor
 sampling:
   interval_seconds: 30
+fgpi:
+  # Humidity shape for FGPI's f_RH. "smooth" (default) is a continuous
+  # smoothstep over `humidity_range`, so the index tracks measured humidity
+  # everywhere instead of sitting at 0 below 60 %RH. "spec" restores the
+  # literal spec section 8 ramp (0 below 60, 1 above 80).
+  humidity_curve: smooth   # smooth | spec
+  humidity_range: [40.0, 90.0]  # %RH: 0 below, 1 above (smooth only)
 spatial:
   x_max: 10.0
   y_max: 8.0

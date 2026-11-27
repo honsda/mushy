@@ -253,10 +253,11 @@ def main(argv: list[str]) -> int:
                 f"\nCALIBRATION NOTE for {row['label']}:\n"
                 f"  Reference growth rate per hour by FGPI class (low..critical): {sequence}\n"
                 f"  Growth first becomes measurable at FGPI class '{first_active}'.\n"
-                "  FGPI's f_RH ramps from 60 %RH (spec section 8) while Hukka-Viitanen\n"
-                "  / ASHRAE 160 needs ~80 % surface RH to activate, so FGPI is an\n"
-                "  early-warning growth-potential index rather than a formation-risk\n"
-                "  index. Flagged, not auto-tuned: the FGPI formula is frozen by spec."
+                "  FGPI's f_RH starts responding at 40 %RH (smoothstep default)\n"
+                "  while Hukka-Viitanen / ASHRAE 160 needs ~80 % surface RH to\n"
+                "  activate, so FGPI is an early-warning growth-potential index\n"
+                "  rather than a formation-risk index. Flagged, not auto-tuned:\n"
+                "  set fgpi.humidity_curve: spec for the literal section 8 ramp."
             )
     return 0
 
