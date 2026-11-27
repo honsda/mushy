@@ -35,7 +35,11 @@ def _read_bh1750(bus_id: int) -> float:
         bus.write_byte(BH1750_ADDR, 0x01)  # power on
         bus.write_byte(BH1750_ADDR, 0x10)  # continuous, high-resolution mode
         time.sleep(0.18)  # integration time for H-resolution mode
-        data = bus.read(BH1750_ADDR, 2)
+        # A bare 2-byte I2C read: smbus2 has no SMBus.read(), and a block read
+        # would prepend a command byte the BH1750 treats as a mode change.
+        message = smbus2.i2c_msg.read(BH1750_ADDR, 2)
+        bus.i2c_rdwr(message)
+        data = list(message)
         raw = (data[0] << 8) | data[1]
         return round(raw / 1.2, 1)
     finally:

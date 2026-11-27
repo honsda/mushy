@@ -184,6 +184,19 @@ Pin the Python version you tested (3.11+). On a Pi 5, Blinka is required; the
 DHT driver is instantiated with `use_pulseio=False`, which is the reliable path
 on modern kernels.
 
+**Bullseye (Python 3.9) fallbacks.** Blinka 8 needs `gpiod` 2.x, which Debian 11
+does not ship; use `pip install "adafruit-blinka<8"` there. Blinka's sysfs path
+cannot time a DHT22 reliably on 3.9, so also install the legacy C driver, which
+`read_temperature_humidity()` falls back to automatically:
+
+```bash
+sudo apt install -y python3-dev build-essential
+pip install Adafruit_DHT
+```
+
+Verify the wiring with `i2cdetect -y 1` (BH1750 answers at `0x23`, or `0x5C`
+when ADDR is tied high) and `raspi-gpio get 2-3` (`func=ALT0` = I2C live).
+
 ---
 
 ## Configuration

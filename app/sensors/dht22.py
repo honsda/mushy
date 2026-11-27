@@ -115,10 +115,10 @@ def read_temperature_humidity() -> dict:
     try:
         return _read_circuitpython(pin)
     except SensorError as first_error:
-        # If Blinka is missing entirely, try the legacy C driver before giving up.
-        if "not installed" in str(first_error):
-            try:
-                return _read_legacy(pin)
-            except SensorError:
-                raise first_error
-        raise
+        # Blinka's sysfs/libgpiod path is timing-sensitive on some kernels, and
+        # on Bullseye it cannot read the DHT22 at all. The legacy C driver talks
+        # to /dev/gpiomem directly, so try it before reporting the failure.
+        try:
+            return _read_legacy(pin)
+        except SensorError:
+            raise first_error
