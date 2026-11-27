@@ -262,6 +262,9 @@ python -m app.server
 
 `--simulate` is equivalent to the environment variable; `--mobile` random-walks
 the node coordinates so the heatmap has spatial variation to interpolate.
+A simulated run logs as `node_id=sim-01` (unless `--node-id`/`FUNGI_NODE_ID`
+says otherwise), so a bench loop left running next to the systemd sampler can
+never mix synthetic rows into the real node's series.
 
 ### On the Pi with hardware
 

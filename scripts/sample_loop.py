@@ -27,7 +27,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app import load_config  # noqa: E402
+from app import load_config, simulation_enabled  # noqa: E402
 from app.db import (  # noqa: E402
     init_db,
     insert_fgpi,
@@ -134,6 +134,15 @@ def main() -> int:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+
+    # A simulated loop must never masquerade as the deployed node. A stray
+    # `FUNGI_SIMULATE=1 sample_loop.py` left running next to the systemd
+    # sampler interleaves fake rows with real ones under one node_id, which
+    # reads on the dashboard as "the graphs don't update" / "FGPI is 0".
+    if simulation_enabled() and args.node_id in {"", "pi-01"}:
+        args.node_id = "sim-01"
+        log.warning("simulation enabled: logging as node_id=sim-01, not the real node")
+
     init_db()
 
     position = _initial_position(cfg)
