@@ -69,7 +69,8 @@ def _short_species(name: str) -> str:
         return "n/a"
     parts = cleaned.split(" ")
     if len(parts) >= 2 and parts[1].lower() in {"spp", "sp.", "sp"}:
-        return f"{parts[0][:1]}. {parts[1].rstrip(".")}"
+        suffix = parts[1].rstrip(".")
+        return f"{parts[0][:1]}. {suffix}"
     if len(parts) >= 2 and len(parts[0]) > 3:
         return f"{parts[0][0]}. {' '.join(parts[1:])}"
     return cleaned

@@ -1,8 +1,8 @@
 """Matplotlib map rendering for every dashboard layer.
 
-Keeps rendering under ~2 s on a Pi 4 by staying at 110 dpi, using Agg, and
-writing atomically (temp file + os.replace) so Flask never serves a half-
-written PNG while the sampler refreshes data.
+Keeps rendering under ~1 s on a Pi 4 by fixing the raster size at 640 px, using
+Agg, caching the colormaps and writing atomically (temp file + os.replace) so
+Flask never serves a half-written PNG while the sampler refreshes data.
 
 `render_png` keeps its spec signature (FGPI only). `render_layer_png` draws any
 registered layer and, when `sites` is supplied, labels each sensor site with its
@@ -15,10 +15,29 @@ import os
 import tempfile
 from pathlib import Path
 
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.colors import LinearSegmentedColormap
 
 from app import load_config
 from app.spatial.layers import Layer, get_layer
+
+# Raster size is fixed so the PNG never needs a resize pass and "tight" layout
+# (which draws the figure twice) stays out of the request path.
+_FIG_SIZE = (6.4, 4.6)
+_DPI = 100
+_COLORMAPS: dict[str, LinearSegmentedColormap] = {}
+
+
+def _cmap(spec: Layer) -> LinearSegmentedColormap:
+    cached = _COLORMAPS.get(spec.key)
+    if cached is None:
+        cached = LinearSegmentedColormap.from_list(f"{spec.key}_map", list(spec.colors))
+        _COLORMAPS[spec.key] = cached
+    return cached
 
 
 def _optimize_png(path: str) -> None:
@@ -48,18 +67,15 @@ def _domain() -> tuple[float, float]:
 
 
 def _save(fig, out: Path) -> None:
-    import matplotlib.pyplot as plt
-
     fd, tmp_name = tempfile.mkstemp(prefix="map-", suffix=".png", dir=str(out.parent))
     os.close(fd)
     try:
         fig.savefig(
             tmp_name,
             format="png",
-            dpi=110,
-            bbox_inches="tight",
+            dpi=_DPI,
             metadata={"Software": "mushy-fungi-forecast"},
-            pil_kwargs={"compress_level": 9},
+            pil_kwargs={"compress_level": 6},
         )
         _optimize_png(tmp_name)
         os.replace(tmp_name, out)
@@ -86,12 +102,6 @@ def render_layer_png(
     y_max: float | None = None,
 ) -> None:
     """Save one layer's map. Each entry in `sites` needs x, y and label."""
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    from matplotlib.colors import LinearSegmentedColormap
-
     spec = layer if isinstance(layer, Layer) else get_layer(layer)
     arr = np.asarray(grid, dtype=float)
     if arr.ndim != 2 or arr.size == 0:
@@ -105,8 +115,8 @@ def render_layer_png(
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
 
-    cmap = LinearSegmentedColormap.from_list(f"{spec.key}_map", list(spec.colors))
-    fig, ax = plt.subplots(figsize=(6.6, 4.7), dpi=110)
+    cmap = _cmap(spec)
+    fig, ax = plt.subplots(figsize=_FIG_SIZE, dpi=_DPI)
     image = ax.imshow(
         arr,
         origin="lower",
